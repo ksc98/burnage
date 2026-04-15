@@ -314,6 +314,7 @@ async fn admin_route(
         (&Method::Get, "/_cm/stats") => (Method::Get, "/stats"),
         (&Method::Get, "/_cm/sessions/ends") => (Method::Get, "/session/ends"),
         (&Method::Post, "/_cm/session/end") => (Method::Post, "/session/end"),
+        (&Method::Post, "/_cm/turn") => (Method::Post, "/turn"),
         (&Method::Post, "/_cm/admin/sql") => {
             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&forwarded_body) {
                 if let Some(h) = v.get("hash").and_then(|x| x.as_str()) {
@@ -421,6 +422,7 @@ impl DurableObject for UserStore {
             (Method::Post, "/search/fts") => self.search_fts(&mut req).await,
             (Method::Post, "/search/hydrate") => self.search_hydrate(&mut req).await,
             (Method::Post, "/search") => self.search(&mut req).await,
+            (Method::Post, "/turn") => self.fetch_turn(&mut req).await,
             _ => Response::error("not found", 404),
         }
     }
@@ -727,6 +729,32 @@ impl UserStore {
             obj.insert("storage_bytes".into(), json!(sql.database_size() as i64));
         }
         Response::from_json(&summary)
+    }
+
+    // Fetch a single turn's complete record — all columns including full
+    // user_text + assistant_text. Backs `burnage turn <tx_id>`.
+    async fn fetch_turn(&self, req: &mut Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct Body {
+            tx_id: String,
+        }
+        let b: Body = match req.json().await {
+            Ok(b) => b,
+            Err(_) => return Response::error("invalid body", 400),
+        };
+        if b.tx_id.trim().is_empty() {
+            return Response::error("missing tx_id", 400);
+        }
+        let sql = self.state.storage().sql();
+        let cursor = sql.exec(
+            "SELECT * FROM transactions WHERE tx_id = ? LIMIT 1",
+            Some(vec![b.tx_id.clone().into()]),
+        )?;
+        let rows: Vec<serde_json::Value> = cursor.to_array().unwrap_or_default();
+        match rows.into_iter().next() {
+            Some(row) => Response::from_json(&row),
+            None => Response::error("not found", 404),
+        }
     }
 
     // FTS5 full-text search over user_text + assistant_text. `snippet()` emits

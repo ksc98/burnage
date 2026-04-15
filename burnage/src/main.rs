@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod quota;
 mod search;
 mod shell;
+mod turn;
 mod usage;
 
 use usage as do_usage;
@@ -49,8 +50,20 @@ enum Cmd {
     },
     /// Full-text + semantic search against your own sessions.
     Search(SearchArgs),
+    /// Dump one transaction's full record (untruncated user_text + asst_text).
+    Turn(TurnArgs),
     /// SQL shell against any DO via /_cm/admin/sql.
     Shell(ShellArgs),
+}
+
+#[derive(clap::Args)]
+struct TurnArgs {
+    /// Synthetic tx_id to look up (e.g. `inflight-1776251872077-c68abdc2`).
+    /// Find one via `burnage search` or `burnage recent`.
+    tx_id: String,
+    /// Output format. Defaults: table for tty, json otherwise.
+    #[arg(long)]
+    format: Option<search::Format>,
 }
 
 #[derive(clap::Args)]
@@ -164,6 +177,16 @@ fn main() -> Result<()> {
                 query: args.query,
                 mode: args.mode,
                 limit: args.limit,
+                format: args.format,
+            });
+        }
+        Cmd::Turn(args) => {
+            let token = read_token()?;
+            let base = resolve_base(url_opt.as_deref())?.to_string();
+            return turn::run(turn::TurnOpts {
+                base,
+                token,
+                tx_id: args.tx_id,
                 format: args.format,
             });
         }
