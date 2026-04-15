@@ -83,6 +83,47 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         init.with_body(Some(arr.into()));
     }
 
+    // Synthetic, stable row PK: carried through placeholder → finalize so
+    // the dashboard keys don't flap when the turn completes. Anthropic's
+    // message.id (once we see it in the SSE stream) goes into
+    // `anthropic_message_id` instead.
+    let placeholder_tx_id = format!(
+        "inflight-{}-{:08x}",
+        start,
+        js_sys::Math::random().to_bits() as u32
+    );
+
+    // Stub is !Clone, so we acquire one per wait_until branch. Cheap —
+    // it's just wasm-bindgen handle lookups, not a round-trip.
+    let acquire_stub = || -> Option<worker::durable::Stub> {
+        let uh = user_hash.as_ref()?;
+        let ns = env.durable_object("USER_STORE").ok()?;
+        let id = ns.id_from_name(uh).ok()?;
+        id.get_stub().ok()
+    };
+    let placeholder_stub = acquire_stub();
+    let finalize_stub = acquire_stub();
+
+    // Fire the placeholder write BEFORE awaiting upstream. Runs in the
+    // background alongside the upstream fetch, so the dashboard sees an
+    // in_flight=1 row within one DO round-trip of the request arriving —
+    // even if the upstream takes 30s to finish streaming.
+    if let Some(stub) = placeholder_stub {
+        let placeholder = TransactionRecord {
+            tx_id: placeholder_tx_id.clone(),
+            ts: start,
+            session_id: session_id.clone(),
+            method: method.to_string(),
+            url: target.clone(),
+            req_body_bytes: req_body_len,
+            in_flight: Some(1),
+            ..Default::default()
+        };
+        ctx.wait_until(async move {
+            post_record_to_do(&stub, "/ingest/start", &placeholder).await;
+        });
+    }
+
     let upstream_req = Request::new_with_init(&target, &init)?;
     let mut resp = Fetch::Request(upstream_req).send().await?;
 
@@ -94,13 +135,6 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     let resp_headers_vec: Vec<(String, String)> = resp.headers().entries().collect();
     let req_body_for_parse = req_body_bytes.clone();
 
-    // Acquire the per-user DO stub up front so the future is Send-clean.
-    let stub = user_hash.as_ref().and_then(|uh| {
-        let ns = env.durable_object("USER_STORE").ok()?;
-        let id = ns.id_from_name(uh).ok()?;
-        id.get_stub().ok()
-    });
-
     ctx.wait_until(async move {
         let mut r = resp_for_log;
         let body = r.bytes().await.unwrap_or_default();
@@ -108,10 +142,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         let stats = parse_sse_usage(&body_str);
         let elapsed = Date::now().as_millis() as i64 - start;
 
-        let tx_id = stats
-            .tx_id
-            .clone()
-            .unwrap_or_else(|| format!("{}-{:08x}", start, js_sys::Math::random().to_bits() as u32));
+        let anthropic_message_id = stats.tx_id.clone();
         let tools_json = if stats.tools.is_empty() {
             None
         } else {
@@ -124,7 +155,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             parse_rate_limits(&resp_headers_vec);
 
         let record = TransactionRecord {
-            tx_id,
+            tx_id: placeholder_tx_id,
             ts: start,
             session_id,
             method: method_str,
@@ -161,6 +192,8 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             rl_req_limit,
             rl_tok_remaining,
             rl_tok_limit,
+            in_flight: Some(0),
+            anthropic_message_id,
         };
 
         // Always emit a structured response log so wrangler tail still works.
@@ -183,18 +216,8 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         });
         console_log!("{}", log.to_string());
 
-        if let Some(stub) = stub {
-            let body_json = serde_json::to_string(&record).unwrap_or_default();
-            let arr = Uint8Array::from(body_json.as_bytes());
-            let mut init = RequestInit::new();
-            init.with_method(Method::Post);
-            init.with_body(Some(arr.into()));
-            // Hostname here is irrelevant — the stub routes by binding, not URL.
-            if let Ok(req) = Request::new_with_init("https://store/ingest", &init) {
-                if let Err(e) = stub.fetch_with_request(req).await {
-                    console_log!("{{\"dir\":\"do_ingest_err\",\"err\":\"{:?}\"}}", e);
-                }
-            }
+        if let Some(stub) = finalize_stub {
+            post_record_to_do(&stub, "/ingest/finalize", &record).await;
         }
     });
 
@@ -278,6 +301,35 @@ fn is_hex16(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+// Serialize a TransactionRecord and POST it to a DO endpoint. Used by
+// both the pre-upstream placeholder write (/ingest/start) and the
+// post-upstream finalize write (/ingest/finalize).
+async fn post_record_to_do(
+    stub: &worker::durable::Stub,
+    path: &str,
+    record: &TransactionRecord,
+) {
+    let body_json = match serde_json::to_string(record) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let arr = Uint8Array::from(body_json.as_bytes());
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    init.with_body(Some(arr.into()));
+    // Hostname is irrelevant — the stub routes by binding, not URL.
+    let url = format!("https://store{}", path);
+    if let Ok(req) = Request::new_with_init(&url, &init) {
+        if let Err(e) = stub.fetch_with_request(req).await {
+            console_log!(
+                "{{\"dir\":\"do_ingest_err\",\"path\":\"{}\",\"err\":\"{:?}\"}}",
+                path,
+                e
+            );
+        }
+    }
+}
+
 // ---------- Per-user Durable Object with SQLite ----------
 
 #[durable_object]
@@ -302,6 +354,8 @@ impl DurableObject for UserStore {
         let path = url.path().to_string();
         match (req.method(), path.as_str()) {
             (Method::Post, "/ingest") => self.ingest(&mut req).await,
+            (Method::Post, "/ingest/start") => self.ingest_start(&mut req).await,
+            (Method::Post, "/ingest/finalize") => self.ingest_finalize(&mut req).await,
             (Method::Post, "/session/end") => self.end_session(&mut req).await,
             (Method::Get, "/session/ends") => self.session_ends().await,
             (Method::Get, "/recent") => self.recent().await,
@@ -366,6 +420,14 @@ impl UserStore {
             ("rl_req_limit", "INTEGER"),
             ("rl_tok_remaining", "INTEGER"),
             ("rl_tok_limit", "INTEGER"),
+            // 1 while the proxy's still waiting on the upstream SSE stream.
+            // Flipped to 0 by /ingest/finalize. Dashboard renders a spinner
+            // while this is 1 and suppresses metric columns (they're all 0).
+            ("in_flight", "INTEGER"),
+            // Anthropic's `message.id` from message_start. Row PK is now a
+            // synthetic `inflight-<ts>-<rand>` so that placeholder → finalize
+            // doesn't mutate the PK (which the dashboard keys rows by).
+            ("anthropic_message_id", "TEXT"),
         ];
         for (name, typ) in new_cols {
             let _ = sql.exec(
@@ -373,6 +435,24 @@ impl UserStore {
                 None,
             );
         }
+        // Partial index keeps the per-init stale-sweep UPDATE cheap: it only
+        // touches rows that are actually in flight, which is ~0 at rest.
+        let _ = sql.exec(
+            "CREATE INDEX IF NOT EXISTS idx_in_flight ON transactions(ts) WHERE in_flight = 1",
+            None,
+        );
+        // Stale sweep: if a worker was evicted between /ingest/start and
+        // /ingest/finalize, the placeholder row would stay in_flight=1
+        // forever. On each fresh DO instance we flip anything older than
+        // 5 min to an error terminal state.
+        let cutoff = (Date::now().as_millis() as i64) - 300_000;
+        let _ = sql.exec(
+            "UPDATE transactions
+             SET in_flight = 0,
+                 stop_reason = COALESCE(stop_reason, 'error')
+             WHERE in_flight = 1 AND ts < ?",
+            Some(vec![cutoff.into()]),
+        );
         self.initialized.set(true);
     }
 
@@ -418,30 +498,71 @@ impl UserStore {
 
     async fn ingest(&self, req: &mut Request) -> Result<Response> {
         let r: TransactionRecord = req.json().await?;
+        self.insert_or_replace(&r)?;
+        Response::ok("ok")
+    }
+
+    // Placeholder write fired from the proxy before the upstream fetch even
+    // returns. Row carries in_flight=1 and zeros/nulls for metric columns
+    // until /ingest/finalize lands.
+    async fn ingest_start(&self, req: &mut Request) -> Result<Response> {
+        let mut r: TransactionRecord = req.json().await?;
+        // Proxy sets in_flight=1, but belt-and-braces.
+        r.in_flight = Some(1);
+        // INSERT OR IGNORE so a retried /start doesn't clobber a finalize
+        // that somehow raced ahead of it.
+        self.insert_or_ignore(&r)?;
+        Response::ok("ok")
+    }
+
+    // Finalize: overwrite the placeholder in-place (same synthetic tx_id).
+    // If the placeholder somehow never landed (worker eviction between
+    // /start and /finalize), INSERT OR REPLACE creates the row from
+    // scratch with the full payload.
+    async fn ingest_finalize(&self, req: &mut Request) -> Result<Response> {
+        let mut r: TransactionRecord = req.json().await?;
+        r.in_flight = Some(0);
+        self.insert_or_replace(&r)?;
+        Response::ok("ok")
+    }
+
+    fn insert_or_replace(&self, r: &TransactionRecord) -> Result<()> {
+        self.write_row("INSERT OR REPLACE", r)
+    }
+
+    fn insert_or_ignore(&self, r: &TransactionRecord) -> Result<()> {
+        self.write_row("INSERT OR IGNORE", r)
+    }
+
+    fn write_row(&self, verb: &str, r: &TransactionRecord) -> Result<()> {
         let sql = self.state.storage().sql();
-        sql.exec(
-            "INSERT OR REPLACE INTO transactions
+        let stmt = format!(
+            "{verb} INTO transactions
              (tx_id, ts, session_id, method, url, status, elapsed_ms,
               model, input_tokens, output_tokens, cache_read, cache_creation,
               stop_reason, tools_json, req_body_bytes, resp_body_bytes,
               cache_creation_5m, cache_creation_1h, thinking_budget, thinking_blocks,
-              max_tokens, rl_req_remaining, rl_req_limit, rl_tok_remaining, rl_tok_limit)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+              max_tokens, rl_req_remaining, rl_req_limit, rl_tok_remaining, rl_tok_limit,
+              in_flight, anthropic_message_id)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        );
+        sql.exec(
+            &stmt,
             Some(vec![
-                r.tx_id.into(),
+                r.tx_id.clone().into(),
                 r.ts.into(),
-                r.session_id.into(),
-                r.method.into(),
-                r.url.into(),
+                r.session_id.clone().into(),
+                r.method.clone().into(),
+                r.url.clone().into(),
                 (r.status as i64).into(),
                 r.elapsed_ms.into(),
-                r.model.into(),
+                r.model.clone().into(),
                 r.input_tokens.into(),
                 r.output_tokens.into(),
                 r.cache_read.into(),
                 r.cache_creation.into(),
-                r.stop_reason.into(),
-                r.tools_json.into(),
+                r.stop_reason.clone().into(),
+                r.tools_json.clone().into(),
                 r.req_body_bytes.into(),
                 r.resp_body_bytes.into(),
                 r.cache_creation_5m.into(),
@@ -453,9 +574,11 @@ impl UserStore {
                 r.rl_req_limit.into(),
                 r.rl_tok_remaining.into(),
                 r.rl_tok_limit.into(),
+                r.in_flight.into(),
+                r.anthropic_message_id.clone().into(),
             ]),
         )?;
-        Response::ok("ok")
+        Ok(())
     }
 
     async fn recent(&self) -> Result<Response> {
@@ -467,7 +590,8 @@ impl UserStore {
                     cache_creation_5m, cache_creation_1h,
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
-                    rl_tok_remaining, rl_tok_limit
+                    rl_tok_remaining, rl_tok_limit,
+                    in_flight, anthropic_message_id
              FROM transactions ORDER BY ts DESC",
             None,
         )?;
@@ -636,6 +760,10 @@ struct TransactionRecord {
     rl_tok_remaining: Option<i64>,
     #[serde(default)]
     rl_tok_limit: Option<i64>,
+    #[serde(default)]
+    in_flight: Option<i64>,
+    #[serde(default)]
+    anthropic_message_id: Option<String>,
 }
 
 // ---------- SSE parsing ----------

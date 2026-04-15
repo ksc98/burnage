@@ -16,6 +16,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Loader2,
   SlidersHorizontal,
   Search,
   Sparkles,
@@ -175,9 +176,20 @@ const columns: ColumnDef<UIRow>[] = [
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const r = row.original.tx;
+      if (r.in_flight === 1) {
+        return (
+          <Loader2
+            size={10}
+            className="animate-spin text-[var(--color-subtle-foreground)]"
+            aria-label="in flight"
+          />
+        );
+      }
+      const cls = stopDotClass(r.stop_reason);
+      if (!cls) return null;
       return (
         <span
-          className={cn("dot", stopDotClass(r.stop_reason))}
+          className={cn("dot", cls)}
           title={r.stop_reason ?? "—"}
           style={{ marginRight: 0 }}
         />
@@ -209,6 +221,13 @@ const columns: ColumnDef<UIRow>[] = [
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="font-mono text-xs text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
       const m = tx.model;
       const thought = (tx.thinking_blocks ?? 0) > 0;
       const budget = tx.thinking_budget ?? null;
@@ -236,12 +255,20 @@ const columns: ColumnDef<UIRow>[] = [
     accessorFn: (r) => (isLeaf(r) ? r.tx.input_tokens : 0),
     id: "in",
     header: "In",
-    cell: ({ row }) =>
-      isLeaf(row.original) ? (
-        <span className="block text-right font-mono text-xs tabular-nums">
-          {fmtInt(row.original.tx.input_tokens)}
+    cell: ({ row }) => {
+      if (!isLeaf(row.original)) return null;
+      const tx = row.original.tx;
+      return (
+        <span
+          className={cn(
+            "block text-right font-mono text-xs tabular-nums",
+            tx.in_flight === 1 && "text-[var(--color-subtle-foreground)]",
+          )}
+        >
+          {tx.in_flight === 1 ? "—" : fmtInt(tx.input_tokens)}
         </span>
-      ) : null,
+      );
+    },
   },
   {
     accessorFn: (r) => (isLeaf(r) ? r.tx.output_tokens : 0),
@@ -250,6 +277,13 @@ const columns: ColumnDef<UIRow>[] = [
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
       const mx = tx.max_tokens ?? 0;
       const util = mx > 0 ? tx.output_tokens / mx : 0;
       const atCeiling = util >= 0.95;
@@ -274,12 +308,22 @@ const columns: ColumnDef<UIRow>[] = [
     accessorFn: (r) => (isLeaf(r) ? r.tx.cache_read : 0),
     id: "cache_read",
     header: "Cache R",
-    cell: ({ row }) =>
-      isLeaf(row.original) ? (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/80">
-          {fmtInt(row.original.tx.cache_read)}
+    cell: ({ row }) => {
+      if (!isLeaf(row.original)) return null;
+      const tx = row.original.tx;
+      return (
+        <span
+          className={cn(
+            "block text-right font-mono text-xs tabular-nums",
+            tx.in_flight === 1
+              ? "text-[var(--color-subtle-foreground)]"
+              : "text-[var(--color-volume)]/80",
+          )}
+        >
+          {tx.in_flight === 1 ? "—" : fmtInt(tx.cache_read)}
         </span>
-      ) : null,
+      );
+    },
   },
   {
     accessorFn: (r) => (isLeaf(r) ? r.tx.cache_creation : 0),
@@ -288,6 +332,13 @@ const columns: ColumnDef<UIRow>[] = [
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
       const total = tx.cache_creation;
       const w5m = tx.cache_creation_5m ?? 0;
       const w1h = tx.cache_creation_1h ?? 0;
@@ -315,7 +366,9 @@ const columns: ColumnDef<UIRow>[] = [
     cell: ({ row }) =>
       isLeaf(row.original) ? (
         <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-          {fmtDuration(row.original.tx.elapsed_ms)}
+          {row.original.tx.in_flight === 1
+            ? "—"
+            : fmtDuration(row.original.tx.elapsed_ms)}
         </span>
       ) : null,
   },
@@ -360,12 +413,22 @@ const columns: ColumnDef<UIRow>[] = [
     accessorFn: (r) => (isLeaf(r) ? estimateCostUsd(r.tx) : 0),
     id: "cost",
     header: "Cost",
-    cell: ({ row }) =>
-      isLeaf(row.original) ? (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-money)]">
-          {fmtUsd(estimateCostUsd(row.original.tx))}
+    cell: ({ row }) => {
+      if (!isLeaf(row.original)) return null;
+      const tx = row.original.tx;
+      return (
+        <span
+          className={cn(
+            "block text-right font-mono text-xs tabular-nums",
+            tx.in_flight === 1
+              ? "text-[var(--color-subtle-foreground)]"
+              : "text-[var(--color-money)]",
+          )}
+        >
+          {tx.in_flight === 1 ? "—" : fmtUsd(estimateCostUsd(tx))}
         </span>
-      ) : null,
+      );
+    },
   },
 ];
 

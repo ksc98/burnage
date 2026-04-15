@@ -137,26 +137,35 @@ If the profile endpoint is unreachable (transient outage, rate limit), the proxy
 
 Each user's private SQLite contains a single table (migrations are idempotent, applied on first access to the DO):
 
-| column              | type    | source                                                      |
-|---------------------|---------|-------------------------------------------------------------|
-| `tx_id`             | TEXT PK | Anthropic's `message.id` from the SSE stream, or a fallback |
-| `ts`                | INT     | Request arrival time (ms since epoch)                       |
-| `session_id`        | TEXT    | `x-claude-code-session-id` header                           |
-| `method`            | TEXT    | HTTP method                                                  |
-| `url`               | TEXT    | Full upstream URL hit                                       |
-| `status`            | INT     | HTTP status returned by Anthropic                            |
-| `elapsed_ms`        | INT     | Total proxy-to-upstream-and-back latency                    |
-| `model`             | TEXT    | Model used, from `message_start`                             |
-| `input_tokens`      | INT     | Parsed from final usage snapshot                             |
-| `output_tokens`     | INT     | Parsed from final usage snapshot                             |
-| `cache_read`        | INT     | Prompt-cache reads                                           |
-| `cache_creation`    | INT     | Prompt-cache writes                                          |
-| `stop_reason`       | TEXT    | `end_turn`, `tool_use`, `max_tokens`, etc.                   |
-| `tools_json`        | TEXT    | JSON array of tool names invoked in the turn                 |
-| `req_body_bytes`    | INT     | Size of the forwarded request body                          |
-| `resp_body_bytes`   | INT     | Size of the captured response body                          |
+| column                   | type    | source                                                              |
+|--------------------------|---------|---------------------------------------------------------------------|
+| `tx_id`                  | TEXT PK | Synthetic `inflight-<ts>-<rand>` assigned at request arrival        |
+| `ts`                     | INT     | Request arrival time (ms since epoch)                               |
+| `session_id`             | TEXT    | `x-claude-code-session-id` header                                   |
+| `method`                 | TEXT    | HTTP method                                                          |
+| `url`                    | TEXT    | Full upstream URL hit                                               |
+| `status`                 | INT     | HTTP status returned by Anthropic                                    |
+| `elapsed_ms`             | INT     | Total proxy-to-upstream-and-back latency                            |
+| `model`                  | TEXT    | Model used, from `message_start`                                     |
+| `input_tokens`           | INT     | Parsed from final usage snapshot                                     |
+| `output_tokens`          | INT     | Parsed from final usage snapshot                                     |
+| `cache_read`             | INT     | Prompt-cache reads                                                   |
+| `cache_creation`         | INT     | Prompt-cache writes                                                  |
+| `stop_reason`            | TEXT    | `end_turn`, `tool_use`, `max_tokens`, etc.                           |
+| `tools_json`             | TEXT    | JSON array of tool names invoked in the turn                         |
+| `req_body_bytes`         | INT     | Size of the forwarded request body                                  |
+| `resp_body_bytes`        | INT     | Size of the captured response body                                  |
+| `in_flight`              | INT     | 1 between `/ingest/start` and `/ingest/finalize`; 0 once done        |
+| `anthropic_message_id`   | TEXT    | Anthropic's `message.id` (set on finalize)                           |
 
-Indexed on `ts DESC` and `(session_id, ts)`.
+Indexed on `ts DESC`, `(session_id, ts)`, and a partial index on `ts` where `in_flight = 1` (backs the orphan sweep).
+
+Each request writes the row twice. A placeholder (`in_flight = 1`, all metrics zero) is
+inserted into the DO as soon as the request arrives, so the dashboard can show a spinner
+while the upstream is still streaming. When the response completes, `/ingest/finalize`
+overwrites the row with the real metrics and flips `in_flight` to 0. If the worker is
+evicted between the two writes, the next fresh DO instance sweeps any placeholder older
+than 5 min to `stop_reason = 'error'`.
 
 ## Admin probes
 

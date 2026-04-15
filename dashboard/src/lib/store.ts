@@ -32,6 +32,10 @@ export type TransactionRow = {
   rl_req_limit?: number | null;
   rl_tok_remaining?: number | null;
   rl_tok_limit?: number | null;
+  /** 1 while the proxy is still waiting on upstream (spinner state); 0/null once finalized. */
+  in_flight?: number | null;
+  /** Anthropic's `message.id` (set on finalize). Row PK `tx_id` is a stable synthetic id. */
+  anthropic_message_id?: string | null;
 };
 
 export type Stats = {

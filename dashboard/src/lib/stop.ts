@@ -1,9 +1,10 @@
-export function stopDotClass(sr: string | null | undefined): string {
-  if (sr === "end_turn") return "dot-good";
-  if (sr === "tool_use") return "dot-muted";
+// Returns null for the common `end_turn` / `tool_use` cases so callers skip
+// rendering the dot entirely — those stop reasons are implicit from the
+// surrounding columns and just add visual noise. A dot means "look here."
+export function stopDotClass(sr: string | null | undefined): string | null {
   if (sr === "max_tokens" || sr === "error") return "dot-danger";
   if (sr === "stop_sequence") return "dot-warn";
-  return "dot-muted";
+  return null;
 }
 
 // Matches stopDotClass but returns a CSS color value (for MixBar, legends,

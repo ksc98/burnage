@@ -12,6 +12,7 @@ import {
 import {
   ChevronDown,
   ChevronRight,
+  Loader2,
   SlidersHorizontal,
   Search,
   Sparkles,
@@ -92,9 +93,20 @@ const columns: ColumnDef<TurnRow>[] = [
     enableHiding: false,
     cell: ({ row }) => {
       const r = row.original.tx;
+      if (r.in_flight === 1) {
+        return (
+          <Loader2
+            size={10}
+            className="animate-spin text-[var(--color-subtle-foreground)]"
+            aria-label="in flight"
+          />
+        );
+      }
+      const cls = stopDotClass(r.stop_reason);
+      if (!cls) return null;
       return (
         <span
-          className={cn("dot", stopDotClass(r.stop_reason))}
+          className={cn("dot", cls)}
           title={r.stop_reason ?? "—"}
           style={{ marginRight: 0 }}
         />
@@ -124,6 +136,13 @@ const columns: ColumnDef<TurnRow>[] = [
     header: "Model",
     cell: ({ row }) => {
       const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="font-mono text-xs text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
       const m = tx.model;
       const thought = (tx.thinking_blocks ?? 0) > 0;
       const budget = tx.thinking_budget ?? null;
@@ -151,11 +170,19 @@ const columns: ColumnDef<TurnRow>[] = [
     accessorFn: (r) => r.tx.input_tokens,
     id: "in",
     header: "In",
-    cell: ({ row }) => (
-      <span className="block text-right font-mono text-xs tabular-nums">
-        {fmtInt(row.original.tx.input_tokens)}
-      </span>
-    ),
+    cell: ({ row }) => {
+      const tx = row.original.tx;
+      return (
+        <span
+          className={cn(
+            "block text-right font-mono text-xs tabular-nums",
+            tx.in_flight === 1 && "text-[var(--color-subtle-foreground)]",
+          )}
+        >
+          {tx.in_flight === 1 ? "—" : fmtInt(tx.input_tokens)}
+        </span>
+      );
+    },
   },
   {
     accessorFn: (r) => r.tx.output_tokens,
@@ -163,6 +190,13 @@ const columns: ColumnDef<TurnRow>[] = [
     header: "Out",
     cell: ({ row }) => {
       const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
       const mx = tx.max_tokens ?? 0;
       const util = mx > 0 ? tx.output_tokens / mx : 0;
       const atCeiling = util >= 0.95;
@@ -187,11 +221,21 @@ const columns: ColumnDef<TurnRow>[] = [
     accessorFn: (r) => r.tx.cache_read,
     id: "cache_read",
     header: "Cache R",
-    cell: ({ row }) => (
-      <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/80">
-        {fmtInt(row.original.tx.cache_read)}
-      </span>
-    ),
+    cell: ({ row }) => {
+      const tx = row.original.tx;
+      return (
+        <span
+          className={cn(
+            "block text-right font-mono text-xs tabular-nums",
+            tx.in_flight === 1
+              ? "text-[var(--color-subtle-foreground)]"
+              : "text-[var(--color-volume)]/80",
+          )}
+        >
+          {tx.in_flight === 1 ? "—" : fmtInt(tx.cache_read)}
+        </span>
+      );
+    },
   },
   {
     accessorFn: (r) => r.tx.cache_creation,
@@ -199,6 +243,13 @@ const columns: ColumnDef<TurnRow>[] = [
     header: "Cache W",
     cell: ({ row }) => {
       const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
       const w5m = tx.cache_creation_5m ?? 0;
       const w1h = tx.cache_creation_1h ?? 0;
       const split = w5m + w1h > 0;
@@ -224,7 +275,9 @@ const columns: ColumnDef<TurnRow>[] = [
     header: "Latency",
     cell: ({ row }) => (
       <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-        {fmtDuration(row.original.tx.elapsed_ms)}
+        {row.original.tx.in_flight === 1
+          ? "—"
+          : fmtDuration(row.original.tx.elapsed_ms)}
       </span>
     ),
   },
@@ -265,11 +318,21 @@ const columns: ColumnDef<TurnRow>[] = [
     accessorFn: (r) => estimateCostUsd(r.tx),
     id: "cost",
     header: "Cost",
-    cell: ({ row }) => (
-      <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-money)]">
-        {fmtUsd(estimateCostUsd(row.original.tx))}
-      </span>
-    ),
+    cell: ({ row }) => {
+      const tx = row.original.tx;
+      return (
+        <span
+          className={cn(
+            "block text-right font-mono text-xs tabular-nums",
+            tx.in_flight === 1
+              ? "text-[var(--color-subtle-foreground)]"
+              : "text-[var(--color-money)]",
+          )}
+        >
+          {tx.in_flight === 1 ? "—" : fmtUsd(estimateCostUsd(tx))}
+        </span>
+      );
+    },
   },
 ];
 
@@ -547,10 +610,12 @@ function TurnDetail({ tx }: { tx: TransactionRow }) {
         label="stop_reason"
         value={
           <span className="font-mono">
-            <span
-              className={cn("dot", stopDotClass(tx.stop_reason))}
-              style={{ marginRight: 6 }}
-            />
+            {(() => {
+              const cls = stopDotClass(tx.stop_reason);
+              return cls ? (
+                <span className={cn("dot", cls)} style={{ marginRight: 6 }} />
+              ) : null;
+            })()}
             {tx.stop_reason ?? "—"}
           </span>
         }
