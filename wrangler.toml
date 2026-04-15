@@ -4,11 +4,9 @@ compatibility_date = "2025-01-01"
 workers_dev = false
 preview_urls = false
 
-# To bind a custom domain, either:
-#   (a) add `routes = [{ pattern = "claude.yourdomain.com", custom_domain = true }]` here
-#       (requires the zone to be on the same Cloudflare account), or
-#   (b) leave this block absent and bind the domain via the Cloudflare dashboard
-#       (Workers → cc-proxy → Settings → Domains & Routes) — this is a one-time UI step.
+# Route patterns are injected at deploy time from $DOMAIN (see justfile);
+# kept out of source so the public repo is deployment-agnostic.
+# The proxy serves /v1/* and /_cm/*, the dashboard worker binds the rest.
 
 # One Durable Object instance per user_hash. Each instance gets its own
 # private SQLite database (via `state.storage().sql()`). No provisioning —
@@ -24,6 +22,11 @@ new_sqlite_classes = ["UserStore"]
 
 [build]
 command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+# Cloudflare caps cpu_ms at 300000 (5 min) for fetch handlers on the paid plan.
+# This is the highest value allowed; 15 min isn't supported for fetch handlers.
+[limits]
+cpu_ms = 300000
 
 [observability]
 enabled = true
