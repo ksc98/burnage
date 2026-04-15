@@ -8,6 +8,7 @@ import Sparkline from "@/components/Sparkline.astro";
 import TokenChart from "@/components/TokenChart";
 import RecentTurnsTable from "@/components/RecentTurnsTable";
 import RowsPoller from "@/components/RowsPoller";
+import { SearchBox } from "@/components/SearchBox";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
 import { getStats, getRecent, getSessionEnds, type TransactionRow, type SessionEnds } from "@/lib/store";
@@ -392,6 +393,10 @@ const rateLimit =
       </section>
     )
   }
+
+  <section class="mt-6">
+    <SearchBox client:load />
+  </section>
 
   <RecentTurnsTable client:load initialRows={rows} />
 </Base>

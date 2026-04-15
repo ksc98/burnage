@@ -392,7 +392,7 @@ async fn post_record_to_do(
 #[durable_object]
 pub struct UserStore {
     state: State,
-    _env: Env,
+    env: Env,
     initialized: std::cell::Cell<bool>,
 }
 
@@ -400,7 +400,7 @@ impl DurableObject for UserStore {
     fn new(state: State, env: Env) -> Self {
         Self {
             state,
-            _env: env,
+            env,
             initialized: std::cell::Cell::new(false),
         }
     }
@@ -420,6 +420,7 @@ impl DurableObject for UserStore {
             (Method::Post, "/sql") => self.sql_exec(&mut req).await,
             (Method::Post, "/search/fts") => self.search_fts(&mut req).await,
             (Method::Post, "/search/hydrate") => self.search_hydrate(&mut req).await,
+            (Method::Post, "/search") => self.search(&mut req).await,
             _ => Response::error("not found", 404),
         }
     }
@@ -730,8 +731,48 @@ impl UserStore {
 
     // FTS5 full-text search over user_text + assistant_text. `snippet()` emits
     // a short window around the match with <mark> highlights; `bm25()` scores
-    // lower-is-better, so we negate it to make it sortable alongside Vectorize
-    // cosine scores on the caller side.
+    // lower-is-better. Returned rows include the negated bm25 as `score` so
+    // higher-is-better sorting works alongside Vectorize cosine scores.
+    fn fts_search_rows(&self, q: &str, limit: i64) -> Result<Vec<serde_json::Value>> {
+        let sql = self.state.storage().sql();
+        let cursor = sql.exec(
+            "SELECT t.tx_id, t.ts, t.session_id, t.model,
+                    snippet(transactions_fts, 0, '<mark>', '</mark>', '…', 10) AS user_snip,
+                    snippet(transactions_fts, 1, '<mark>', '</mark>', '…', 10) AS asst_snip,
+                    -bm25(transactions_fts) AS score
+             FROM transactions_fts
+             JOIN transactions t ON t.rowid = transactions_fts.rowid
+             WHERE transactions_fts MATCH ?
+             ORDER BY bm25(transactions_fts) ASC
+             LIMIT ?",
+            Some(vec![q.into(), limit.into()]),
+        )?;
+        Ok(cursor.to_array().unwrap_or_default())
+    }
+
+    // Hydrate a set of tx_ids (from Vectorize) into rows with plain-substring
+    // snippets. No MATCH means no `snippet()` highlights — callers that want
+    // highlights should use fts_search_rows.
+    fn hydrate_rows(&self, tx_ids: &[String]) -> Result<Vec<serde_json::Value>> {
+        if tx_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = tx_ids.iter().take(200).cloned().collect();
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let query = format!(
+            "SELECT tx_id, ts, session_id, model,
+                    substr(COALESCE(user_text, ''), 1, 200) AS user_snip,
+                    substr(COALESCE(assistant_text, ''), 1, 200) AS asst_snip
+             FROM transactions WHERE tx_id IN ({})",
+            placeholders
+        );
+        let params: Vec<SqlStorageValue> = ids.into_iter().map(SqlStorageValue::from).collect();
+        let cursor = self.state.storage().sql().exec(&query, Some(params))?;
+        Ok(cursor.to_array().unwrap_or_default())
+    }
+
+    // HTTP handler for /search/fts — thin wrapper over fts_search_rows.
+    // Kept as a public DO route so `burnage shell` can hit FTS directly.
     async fn search_fts(&self, req: &mut Request) -> Result<Response> {
         #[derive(Deserialize)]
         struct Body {
@@ -747,30 +788,12 @@ impl UserStore {
             return Response::error("missing q", 400);
         }
         let limit = b.limit.unwrap_or(20).clamp(1, 100);
-
-        let sql = self.state.storage().sql();
-        let cursor = sql.exec(
-            "SELECT t.tx_id, t.ts, t.session_id, t.model,
-                    snippet(transactions_fts, 0, '<mark>', '</mark>', '…', 10) AS user_snip,
-                    snippet(transactions_fts, 1, '<mark>', '</mark>', '…', 10) AS asst_snip,
-                    -bm25(transactions_fts) AS score
-             FROM transactions_fts
-             JOIN transactions t ON t.rowid = transactions_fts.rowid
-             WHERE transactions_fts MATCH ?
-             ORDER BY bm25(transactions_fts) ASC
-             LIMIT ?",
-            Some(vec![b.q.into(), limit.into()]),
-        );
-        let rows: Vec<serde_json::Value> = match cursor {
-            Ok(c) => c.to_array().unwrap_or_default(),
-            Err(e) => return sql_error_response(&format!("fts: {e}")),
-        };
-        Response::from_json(&rows)
+        match self.fts_search_rows(&b.q, limit) {
+            Ok(rows) => Response::from_json(&rows),
+            Err(e) => sql_error_response(&format!("fts: {e}")),
+        }
     }
 
-    // Hydrate a set of tx_ids (from Vectorize) into the fields the proxy needs
-    // to present search results. Snippets here are plain truncations — not
-    // highlighted — since there's no MATCH to feed `snippet()`.
     async fn search_hydrate(&self, req: &mut Request) -> Result<Response> {
         #[derive(Deserialize)]
         struct Body {
@@ -780,22 +803,152 @@ impl UserStore {
             Ok(b) => b,
             Err(_) => return Response::error("invalid body", 400),
         };
-        if b.tx_ids.is_empty() {
-            return Response::from_json(&serde_json::Value::Array(Vec::new()));
-        }
-        let ids: Vec<String> = b.tx_ids.into_iter().take(200).collect();
-        let placeholders = vec!["?"; ids.len()].join(",");
-        let query = format!(
-            "SELECT tx_id, ts, session_id, model,
-                    substr(COALESCE(user_text, ''), 1, 200) AS user_snip,
-                    substr(COALESCE(assistant_text, ''), 1, 200) AS asst_snip
-             FROM transactions WHERE tx_id IN ({})",
-            placeholders
-        );
-        let params: Vec<SqlStorageValue> = ids.into_iter().map(SqlStorageValue::from).collect();
-        let cursor = self.state.storage().sql().exec(&query, Some(params))?;
-        let rows: Vec<serde_json::Value> = cursor.to_array().unwrap_or_default();
+        let rows = self.hydrate_rows(&b.tx_ids)?;
         Response::from_json(&rows)
+    }
+
+    // Orchestrator: runs FTS + Vectorize internally and merges via RRF.
+    // Entry point for both the proxy's /_cm/search and the dashboard's
+    // /api/search — having it in one place keeps the TS side a dumb pipe.
+    //
+    // Rate limit lives here so both entrypoints are covered by one
+    // implementation. DO storage gives us a strongly-consistent counter
+    // for free — no KV eventual-consistency race on the bucket.
+    async fn search(&self, req: &mut Request) -> Result<Response> {
+        #[derive(Deserialize)]
+        struct Body {
+            q: String,
+            #[serde(default)]
+            mode: Option<String>,
+            #[serde(default)]
+            limit: Option<i64>,
+            /// Caller-supplied user_hash. Required only for `mode=vector|hybrid`
+            /// because Vectorize needs it for the `{prefix}:` id strip and the
+            /// metadata filter. The DO itself doesn't know its own name.
+            #[serde(default)]
+            user_hash: Option<String>,
+        }
+        let b: Body = match req.json().await {
+            Ok(b) => b,
+            Err(_) => return Response::error("invalid body", 400),
+        };
+        if b.q.trim().is_empty() {
+            return Response::error("missing q", 400);
+        }
+        let mode = b.mode.as_deref().unwrap_or("hybrid");
+        let limit = b.limit.unwrap_or(20).clamp(1, 100);
+
+        if let Err(resp) = self.check_search_rate_limit() {
+            return resp;
+        }
+
+        match mode {
+            "fts" => {
+                let rows = self
+                    .fts_search_rows(&b.q, limit)
+                    .unwrap_or_default();
+                let hits = hits_from_rows(rows, "fts");
+                Response::from_json(&json!({ "mode": "fts", "results": hits }))
+            }
+            "vector" => {
+                let hits = self
+                    .vector_search(&b.q, limit, b.user_hash.as_deref())
+                    .await
+                    .unwrap_or_default();
+                Response::from_json(&json!({ "mode": "vector", "results": hits }))
+            }
+            _ => {
+                let fts_rows = self.fts_search_rows(&b.q, limit).unwrap_or_default();
+                let fts_hits = hits_from_rows(fts_rows, "fts");
+                let vec_hits = self
+                    .vector_search(&b.q, limit, b.user_hash.as_deref())
+                    .await
+                    .unwrap_or_default();
+                let merged = reciprocal_rank_fusion(fts_hits, vec_hits, limit as usize);
+                Response::from_json(&json!({ "mode": "hybrid", "results": merged }))
+            }
+        }
+    }
+
+    // Vector branch: embed the query via Workers AI, hit Vectorize with the
+    // caller's user_hash as a metadata filter, hydrate the returned tx_ids.
+    // Returns an empty vec (never an error) when user_hash is missing —
+    // semantic search simply isn't available in that case, which is a
+    // degraded-but-functional state (FTS still works).
+    async fn vector_search(
+        &self,
+        q: &str,
+        limit: i64,
+        user_hash: Option<&str>,
+    ) -> std::result::Result<Vec<SearchHit>, String> {
+        let Some(user_hash) = user_hash else {
+            return Ok(Vec::new());
+        };
+        let vec = embed_text(&self.env, q).await.ok_or("embed failed")?;
+        let matches = vectorize_query(&self.env, user_hash, &vec, limit as usize).await?;
+        if matches.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tx_ids: Vec<String> = matches.iter().map(|(id, _)| id.clone()).collect();
+        let rows = self.hydrate_rows(&tx_ids).map_err(|e| format!("hydrate: {e}"))?;
+        let mut hits = hits_from_rows(rows, "vector");
+        let score_by_id: std::collections::HashMap<String, f64> = matches.into_iter().collect();
+        for h in &mut hits {
+            if let Some(&s) = score_by_id.get(&h.tx_id) {
+                h.score = s;
+            }
+        }
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(hits)
+    }
+
+    // Fixed 60s window, 120 requests/min/user. Counter lives in the DO's
+    // SQLite so it's strongly consistent without a KV round-trip. Buckets
+    // older than 5 min are cleaned up opportunistically on each check.
+    fn check_search_rate_limit(&self) -> std::result::Result<(), Result<Response>> {
+        const LIMIT_PER_MIN: i64 = 120;
+        let sql = self.state.storage().sql();
+        let _ = sql.exec(
+            "CREATE TABLE IF NOT EXISTS search_rate_limit (
+                bucket INTEGER PRIMARY KEY,
+                count INTEGER NOT NULL
+            )",
+            None,
+        );
+        let now_ms = Date::now().as_millis() as i64;
+        let bucket = now_ms / 60_000;
+        // Opportunistic GC of stale buckets. Cheap — table stays tiny.
+        let _ = sql.exec(
+            "DELETE FROM search_rate_limit WHERE bucket < ?",
+            Some(vec![(bucket - 5).into()]),
+        );
+        let _ = sql.exec(
+            "INSERT INTO search_rate_limit(bucket, count) VALUES (?, 1)
+             ON CONFLICT(bucket) DO UPDATE SET count = count + 1",
+            Some(vec![bucket.into()]),
+        );
+        let cur = match sql.exec(
+            "SELECT count FROM search_rate_limit WHERE bucket = ?",
+            Some(vec![bucket.into()]),
+        ) {
+            Ok(c) => c
+                .to_array::<serde_json::Value>()
+                .ok()
+                .and_then(|rs| rs.into_iter().next())
+                .and_then(|r| r.get("count").and_then(|v| v.as_i64()))
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+        if cur > LIMIT_PER_MIN {
+            let retry_after = 60 - ((now_ms % 60_000) / 1000) as i64;
+            return Err(Response::from_json(&json!({
+                "error": "rate_limited",
+                "limit_per_min": LIMIT_PER_MIN,
+                "retry_after_seconds": retry_after,
+            }))
+            .map(|r| r.with_status(429)));
+        }
+        Ok(())
     }
 
     // Generic SQL execution endpoint. Powers `burnage shell` and any other
@@ -1391,15 +1544,6 @@ async fn vectorize_query(
 
 // ---------- /_cm/search ----------
 
-#[derive(Deserialize, Default)]
-struct SearchQuery {
-    q: String,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    limit: Option<i64>,
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct SearchHit {
     tx_id: String,
@@ -1413,104 +1557,35 @@ struct SearchHit {
     match_source: String,
 }
 
+// Thin forwarder: all orchestration lives in UserStore::search (DO-side).
+// We augment the caller's body with their resolved user_hash so the DO can
+// talk to Vectorize with the right id-prefix + metadata filter.
 async fn handle_search(user_hash: &str, body: &[u8], env: &Env) -> Result<Response> {
-    let q: SearchQuery = serde_json::from_slice(body).unwrap_or_default();
-    if q.q.trim().is_empty() {
-        return Response::error("missing q", 400);
+    let mut v: serde_json::Value = serde_json::from_slice(body).unwrap_or(json!({}));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("user_hash".into(), json!(user_hash));
+    } else {
+        v = json!({ "user_hash": user_hash });
     }
-    let mode = q.mode.as_deref().unwrap_or("hybrid");
-    let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
+    let augmented = serde_json::to_vec(&v).unwrap_or_default();
 
     let ns = env.durable_object("USER_STORE")?;
     let stub = ns.id_from_name(user_hash)?.get_stub()?;
 
-    match mode {
-        "fts" => {
-            let hits = search_fts(&stub, &q.q, limit).await.unwrap_or_default();
-            Response::from_json(&json!({ "mode": "fts", "results": hits }))
-        }
-        "vector" => {
-            let hits = search_vector(env, &stub, user_hash, &q.q, limit)
-                .await
-                .unwrap_or_default();
-            Response::from_json(&json!({ "mode": "vector", "results": hits }))
-        }
-        _ => {
-            // Hybrid: run both, merge via reciprocal rank fusion.
-            let fts_hits = search_fts(&stub, &q.q, limit).await.unwrap_or_default();
-            let vec_hits = search_vector(env, &stub, user_hash, &q.q, limit)
-                .await
-                .unwrap_or_default();
-            let merged = reciprocal_rank_fusion(fts_hits, vec_hits, limit);
-            Response::from_json(&json!({ "mode": "hybrid", "results": merged }))
-        }
-    }
-}
-
-async fn search_fts(
-    stub: &worker::durable::Stub,
-    q: &str,
-    limit: usize,
-) -> std::result::Result<Vec<SearchHit>, String> {
-    let body = serde_json::to_vec(&json!({ "q": q, "limit": limit })).unwrap();
-    let hits = call_do_json(stub, "/search/fts", &body).await?;
-    parse_hits(hits, "fts")
-}
-
-async fn search_vector(
-    env: &Env,
-    stub: &worker::durable::Stub,
-    user_hash: &str,
-    q: &str,
-    limit: usize,
-) -> std::result::Result<Vec<SearchHit>, String> {
-    let vec = embed_text(env, q).await.ok_or("embed failed")?;
-    let matches = vectorize_query(env, user_hash, &vec, limit).await?;
-    if matches.is_empty() {
-        return Ok(Vec::new());
-    }
-    let tx_ids: Vec<String> = matches.iter().map(|(id, _)| id.clone()).collect();
-    let body = serde_json::to_vec(&json!({ "tx_ids": tx_ids })).unwrap();
-    let hydrated = call_do_json(stub, "/search/hydrate", &body).await?;
-    let mut hits = parse_hits(hydrated, "vector")?;
-    // Graft the cosine-similarity scores from Vectorize onto the hydrated rows.
-    let score_by_id: std::collections::HashMap<String, f64> = matches.into_iter().collect();
-    for h in &mut hits {
-        if let Some(&s) = score_by_id.get(&h.tx_id) {
-            h.score = s;
-        }
-    }
-    // Preserve Vectorize's ranking (DO's IN() doesn't).
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(hits)
-}
-
-async fn call_do_json(
-    stub: &worker::durable::Stub,
-    path: &str,
-    body: &[u8],
-) -> std::result::Result<serde_json::Value, String> {
-    let arr = Uint8Array::from(body);
+    let arr = Uint8Array::from(&augmented[..]);
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
     init.with_body(Some(arr.into()));
     let headers = Headers::new();
     headers.append("content-type", "application/json").ok();
     init.with_headers(headers);
-    let req = Request::new_with_init(&format!("https://store{}", path), &init)
-        .map_err(|e| format!("build req: {e}"))?;
-    let mut resp = stub
-        .fetch_with_request(req)
-        .await
-        .map_err(|e| format!("fetch: {e}"))?;
-    let text = resp.text().await.map_err(|e| format!("body: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("parse: {e}"))
+    let req = Request::new_with_init("https://store/search", &init)?;
+    stub.fetch_with_request(req).await
 }
 
-fn parse_hits(v: serde_json::Value, source: &str) -> std::result::Result<Vec<SearchHit>, String> {
-    let arr = v.as_array().ok_or_else(|| "expected array".to_string())?;
-    let mut out = Vec::with_capacity(arr.len());
-    for row in arr {
+fn hits_from_rows(rows: Vec<serde_json::Value>, source: &str) -> Vec<SearchHit> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
         let hit = SearchHit {
             tx_id: row
                 .get("tx_id")
@@ -1538,7 +1613,7 @@ fn parse_hits(v: serde_json::Value, source: &str) -> std::result::Result<Vec<Sea
             out.push(hit);
         }
     }
-    Ok(out)
+    out
 }
 
 /// RRF: score = Σ 1 / (k + rank). k=60 is the standard constant (Cormack et al. 2009).
