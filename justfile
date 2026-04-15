@@ -55,3 +55,10 @@ dashboard-tail:
 
 # Deploy both workers.
 deploy-all: deploy dashboard-deploy
+
+# -------- Cloudflare Access --------
+
+# Idempotently provision / repair the Access apps and policies for $DOMAIN.
+# Needs CF_API_TOKEN (Access: Apps and Policies Edit) + CF_ACCOUNT_ID.
+cf-access:
+    ./scripts/cf-access.sh
