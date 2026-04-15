@@ -20,6 +20,28 @@ const LIMIT_DO_BYTES: f64 = 5.0e9;
 const LIMIT_BUILD_MIN: f64 = 3_000.0;
 const LIMIT_VEC_QUERIED_DIMS: f64 = 50_000_000.0;
 const LIMIT_VEC_STORED_DIMS: f64 = 10_000_000.0;
+// Workers AI on the Paid plan includes 10,000 neurons/day. There's no
+// monthly pool — the daily allocation is multiplied by the number of days
+// in the window to produce an approximate "included" total. Overage is
+// billed at $0.011 per 1,000 neurons.
+// https://developers.cloudflare.com/workers-ai/platform/pricing/
+const AI_NEURONS_PER_DAY: f64 = 10_000.0;
+
+// Overage pricing (USD per overage unit). These are used to estimate what
+// you'd pay if the current usage persisted for the full billing month —
+// they are "what if" projections against the displayed bars, not a
+// statement about what Cloudflare will actually charge (billing is
+// per-calendar-month, not per-query-window).
+const RATE_REQ_PER_M: f64 = 0.30;
+const RATE_CPU_PER_M_MS: f64 = 0.02;
+const RATE_DO_REQ_PER_M: f64 = 0.15;
+const RATE_DO_DURATION_PER_M_GBS: f64 = 12.50;
+const RATE_DO_ROWS_READ_PER_M: f64 = 0.001;
+const RATE_DO_ROWS_WRITTEN_PER_M: f64 = 1.0;
+const RATE_DO_STORAGE_PER_GB: f64 = 0.20;
+const RATE_VEC_QUERIED_PER_M: f64 = 0.01;
+const RATE_VEC_STORED_PER_100M: f64 = 0.05;
+const RATE_AI_PER_1K: f64 = 0.011;
 
 pub(crate) const BAR_WIDTH: usize = 24;
 // Per-Durable-Object SQLite storage hard cap (not the account-wide monthly
@@ -113,6 +135,19 @@ const BUILD_Q: &str = r#"query B($acct:String!,$from:Time!,$to:Time!){
   }}
 }"#;
 
+const AI_Q: &str = r#"query AI($acct:String!,$from:Time!,$to:Time!){
+  viewer{accounts(filter:{accountTag:$acct}){
+    aiInferenceAdaptiveGroups(
+      filter:{datetime_geq:$from,datetime_leq:$to},
+      limit:1000
+    ){
+      sum{totalNeurons}
+      count
+      dimensions{modelId}
+    }
+  }}
+}"#;
+
 pub struct QuotaArgs {
     pub window: String,
     pub api_token: Option<String>,
@@ -144,6 +179,21 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     let vec_queries = gql(&api_token, VEC_QUERIES_Q, &vars)?;
     let vec_storage = gql(&api_token, VEC_STORAGE_Q, &vars)?;
     let builds = gql(&api_token, BUILD_Q, &vars)?;
+    let ai = gql(&api_token, AI_Q, &vars)?;
+    // Workers AI resets at 00:00 UTC, so a separate "today" query tracks
+    // the only window that actually matters for the daily allocation.
+    let today_from = format!(
+        "{:04}-{:02}-{:02}T00:00:00Z",
+        Utc::now().year(),
+        Utc::now().month(),
+        Utc::now().day()
+    );
+    let ai_today_vars = json!({
+        "acct": account_id,
+        "from": today_from,
+        "to": to,
+    });
+    let ai_today = gql(&api_token, AI_Q, &ai_today_vars)?;
 
     let ws = aggregate_workers(&workers);
     let dos = aggregate_dos(&do_inv);
@@ -153,6 +203,8 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     let vec_q = aggregate_vec_queries(&vec_queries);
     let vec_s = aggregate_vec_storage(&vec_storage);
     let build_min = sum_build_minutes(&builds);
+    let ai_rows = aggregate_ai(&ai);
+    let ai_today_rows = aggregate_ai(&ai_today);
 
     println!(
         "{} {} → {} {}",
@@ -172,6 +224,8 @@ pub fn run(args: QuotaArgs) -> Result<()> {
         &vec_q,
         &vec_s,
         build_min,
+        &ai_rows,
+        &ai_today_rows,
     );
     println!();
     print_workers(&sty, &ws);
@@ -181,6 +235,8 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     print_storage(&sty, &storage);
     println!();
     print_vectorize(&sty, &vec_q, &vec_s);
+    println!();
+    print_workers_ai(&sty, &ai_rows);
 
     Ok(())
 }
@@ -537,6 +593,42 @@ fn aggregate_storage(v: &Value, ns_map: &BTreeMap<String, String>) -> Vec<Storag
         .collect()
 }
 
+struct AiRow {
+    model: String,
+    requests: u64,
+    neurons: f64,
+}
+
+fn aggregate_ai(v: &Value) -> Vec<AiRow> {
+    let rows = account(v)
+        .and_then(|a| a.get("aiInferenceAdaptiveGroups"))
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut by_model: BTreeMap<String, AiRow> = BTreeMap::new();
+    for r in rows {
+        let model = r
+            .pointer("/dimensions/modelId")
+            .and_then(|x| x.as_str())
+            .unwrap_or("__unknown__")
+            .to_string();
+        let entry = by_model.entry(model.clone()).or_insert(AiRow {
+            model,
+            requests: 0,
+            neurons: 0.0,
+        });
+        entry.requests += u64_at(&r, "/count");
+        entry.neurons += f64_at(&r, "/sum/totalNeurons");
+    }
+    let mut out: Vec<_> = by_model.into_values().collect();
+    out.sort_by(|a, b| {
+        b.neurons
+            .partial_cmp(&a.neurons)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
 fn sum_build_minutes(v: &Value) -> f64 {
     account(v)
         .and_then(|a| a.get("workersBuildsBuildMinutesAdaptiveGroups"))
@@ -574,6 +666,8 @@ fn print_totals(
     vec_q: &[VecQueryRow],
     vec_s: &[VecStorageRow],
     build_min: f64,
+    ai: &[AiRow],
+    ai_today: &[AiRow],
 ) {
     let total_req: u64 = ws.iter().map(|w| w.requests).sum();
     let total_err: u64 = ws.iter().map(|w| w.errors).sum();
@@ -592,72 +686,136 @@ fn print_totals(
     let total_do_exceeded_mem: u64 = do_usage.iter().map(|d| d.exceeded_mem).sum();
     let total_vec_queried: u64 = vec_q.iter().map(|v| v.queried_dims).sum();
     let total_vec_stored: u64 = vec_s.iter().map(|v| v.stored_dims).sum();
+    let total_ai_requests: u64 = ai.iter().map(|r| r.requests).sum();
+    let total_ai_neurons: f64 = ai.iter().map(|r| r.neurons).sum();
+    // Workers AI resets at 00:00 UTC and does not pool across days, so the
+    // "billable" comparison is today's usage vs the 10k/day allocation.
+    let total_ai_neurons_today: f64 = ai_today.iter().map(|r| r.neurons).sum();
+    let total_ai_requests_today: u64 = ai_today.iter().map(|r| r.requests).sum();
 
     println!("{}", sty.header("ACCOUNT TOTALS"));
     println!(
         "{}",
-        sty.dim("  (monthly allocation included in Workers Paid plan)")
+        sty.dim(
+            "  (allocation included in Workers Paid plan; $ = projected overage if usage persists)"
+        )
     );
-    let items: Vec<(&str, String, String, f64)> = vec![
+    // Overage $ is a "what if usage persisted through end-of-month"
+    // projection for pooled metrics (requests, CPU, DO, Vectorize) and
+    // windowed daily-avg projection for AI neurons. Not an authoritative
+    // bill; the rates are from CF's public pricing pages.
+    fn overage(used: f64, limit: f64, rate_per_unit: f64) -> f64 {
+        ((used - limit).max(0.0)) * rate_per_unit
+    }
+    // AI overage: today's usage beyond the 10k daily allocation. Bills
+    // happen per calendar day; this is the only honest number to show.
+    let ai_overage_usd = (total_ai_neurons_today - AI_NEURONS_PER_DAY).max(0.0)
+        * RATE_AI_PER_1K
+        / 1_000.0;
+
+    let items: Vec<(&str, String, String, f64, f64)> = vec![
         (
             "requests",
             human_count(total_req),
             human_count(LIMIT_REQ as u64),
             total_req as f64 / LIMIT_REQ,
+            overage(total_req as f64, LIMIT_REQ, RATE_REQ_PER_M / 1e6),
         ),
         (
             "cpu time",
             human_ms(total_cpu_ms),
             human_ms(LIMIT_CPU_MS as u64),
             total_cpu_ms as f64 / LIMIT_CPU_MS,
+            overage(total_cpu_ms as f64, LIMIT_CPU_MS, RATE_CPU_PER_M_MS / 1e6),
         ),
         (
             "do requests",
             human_count(total_do_req),
             human_count(LIMIT_DO_REQ as u64),
             total_do_req as f64 / LIMIT_DO_REQ,
+            overage(total_do_req as f64, LIMIT_DO_REQ, RATE_DO_REQ_PER_M / 1e6),
         ),
         (
             "do duration",
             format!("{} GB-s", human_num(total_do_duration)),
             format!("{} GB-s", human_num(LIMIT_DO_DURATION_GB_S)),
             total_do_duration / LIMIT_DO_DURATION_GB_S,
+            overage(
+                total_do_duration,
+                LIMIT_DO_DURATION_GB_S,
+                RATE_DO_DURATION_PER_M_GBS / 1e6,
+            ),
         ),
         (
             "do rows read",
             human_count(total_do_rows_read),
             human_count(LIMIT_DO_ROWS_READ as u64),
             total_do_rows_read as f64 / LIMIT_DO_ROWS_READ,
+            overage(
+                total_do_rows_read as f64,
+                LIMIT_DO_ROWS_READ,
+                RATE_DO_ROWS_READ_PER_M / 1e6,
+            ),
         ),
         (
             "do rows written",
             human_count(total_do_rows_written),
             human_count(LIMIT_DO_ROWS_WRITTEN as u64),
             total_do_rows_written as f64 / LIMIT_DO_ROWS_WRITTEN,
+            overage(
+                total_do_rows_written as f64,
+                LIMIT_DO_ROWS_WRITTEN,
+                RATE_DO_ROWS_WRITTEN_PER_M / 1e6,
+            ),
         ),
         (
             "do storage",
             human_bytes(total_do_bytes),
             human_bytes(LIMIT_DO_BYTES as u64),
             total_do_bytes as f64 / LIMIT_DO_BYTES,
+            // DO storage is priced per GB-month; convert bytes over limit
+            // into decimal GB (Cloudflare's convention) and multiply by rate.
+            overage(
+                total_do_bytes as f64 / 1e9,
+                LIMIT_DO_BYTES / 1e9,
+                RATE_DO_STORAGE_PER_GB,
+            ),
         ),
         (
             "vec queried",
             human_count(total_vec_queried),
             human_count(LIMIT_VEC_QUERIED_DIMS as u64),
             total_vec_queried as f64 / LIMIT_VEC_QUERIED_DIMS,
+            overage(
+                total_vec_queried as f64,
+                LIMIT_VEC_QUERIED_DIMS,
+                RATE_VEC_QUERIED_PER_M / 1e6,
+            ),
         ),
         (
             "vec stored",
             human_count(total_vec_stored),
             human_count(LIMIT_VEC_STORED_DIMS as u64),
             total_vec_stored as f64 / LIMIT_VEC_STORED_DIMS,
+            overage(
+                total_vec_stored as f64,
+                LIMIT_VEC_STORED_DIMS,
+                RATE_VEC_STORED_PER_100M / 1e8,
+            ),
+        ),
+        (
+            "ai neurons today",
+            human_num(total_ai_neurons_today),
+            human_num(AI_NEURONS_PER_DAY),
+            total_ai_neurons_today / AI_NEURONS_PER_DAY,
+            ai_overage_usd,
         ),
         (
             "build mins",
             format!("{build_min:.1}"),
             format!("{}", LIMIT_BUILD_MIN as u64),
             build_min / LIMIT_BUILD_MIN,
+            0.0, // build minutes overage not included here
         ),
     ];
 
@@ -668,19 +826,25 @@ fn print_totals(
         .max()
         .unwrap_or(0);
 
-    for (label, used, limit, frac) in &items {
+    for (label, used, limit, frac, overage_usd) in &items {
         let used_limit = format!("{used} / {limit}");
-        let pad_label = " ".repeat(label_w - label.len());
+        let pad_label = " ".repeat(label_w.saturating_sub(label.len()));
         let pad_val = " ".repeat(val_w.saturating_sub(used_limit.chars().count()));
         let pct_str = format_pct(*frac);
+        let overage_cell = if *overage_usd > 0.0 {
+            sty.bold_color(&fmt_usd(*overage_usd), "31")
+        } else {
+            sty.dim("—")
+        };
         println!(
-            "  {}{}  {}{}  {}  {}",
+            "  {}{}  {}{}  {}  {}  {}",
             label,
             pad_label,
             used_limit,
             pad_val,
             bar(sty, *frac, BAR_WIDTH),
             sty.bold_color(&pct_str, frac_color(*frac)),
+            overage_cell,
         );
     }
 
@@ -729,9 +893,25 @@ fn print_totals(
                 sty.dim("0")
             },
         ),
+        (
+            "ai requests",
+            sty.dim(&format!(
+                "{} ({} today)",
+                human_count(total_ai_requests),
+                human_count(total_ai_requests_today),
+            )),
+        ),
+        (
+            "ai neurons",
+            sty.dim(&format!(
+                "{} ({} today)",
+                human_num(total_ai_neurons),
+                human_num(total_ai_neurons_today),
+            )),
+        ),
     ];
     for (label, val) in &info_rows {
-        let pad = " ".repeat(label_w - label.len());
+        let pad = " ".repeat(label_w.saturating_sub(label.len()));
         println!("  {}{}  {}", label, pad, val);
     }
 }
@@ -992,6 +1172,46 @@ fn print_vectorize(sty: &Style, vec_q: &[VecQueryRow], vec_s: &[VecStorageRow]) 
     print_table(sty, &cols, &rows);
 }
 
+fn print_workers_ai(sty: &Style, ai: &[AiRow]) {
+    println!("{}", sty.header("WORKERS AI (per-model)"));
+    if ai.is_empty() {
+        println!("  {}", sty.dim("(no Workers AI inference in window)"));
+        return;
+    }
+
+    let total_req: u64 = ai.iter().map(|r| r.requests).sum();
+    let total_neurons: f64 = ai.iter().map(|r| r.neurons).sum();
+
+    let cols = [
+        Col { header: "model",    align: Align::Left },
+        Col { header: "requests", align: Align::Right },
+        Col { header: "share",    align: Align::Right },
+        Col { header: "neurons",  align: Align::Right },
+        Col { header: "share",    align: Align::Right },
+    ];
+
+    let rows: Vec<Vec<String>> = ai
+        .iter()
+        .map(|r| {
+            let req_share = frac(r.requests, total_req);
+            let neu_share = if total_neurons > 0.0 {
+                r.neurons / total_neurons
+            } else {
+                0.0
+            };
+            vec![
+                r.model.clone(),
+                human_count(r.requests),
+                sty.dim(&format!("{:.1}%", req_share * 100.0)),
+                human_num(r.neurons),
+                sty.dim(&format!("{:.1}%", neu_share * 100.0)),
+            ]
+        })
+        .collect();
+
+    print_table(sty, &cols, &rows);
+}
+
 fn print_storage(sty: &Style, storage: &[StorageRow]) {
     println!("{}", sty.header("DURABLE OBJECTS (sqlite storage, current)"));
     if storage.is_empty() {
@@ -1083,6 +1303,18 @@ pub(crate) fn human_bytes(n: u64) -> String {
         i += 1;
     }
     format!("{:.1} {}", f, units[i])
+}
+
+pub(crate) fn fmt_usd(amount: f64) -> String {
+    if amount >= 1000.0 {
+        format!("${amount:.0}")
+    } else if amount >= 10.0 {
+        format!("${amount:.2}")
+    } else if amount >= 0.01 {
+        format!("${amount:.3}")
+    } else {
+        format!("${amount:.4}")
+    }
 }
 
 pub(crate) fn format_pct(frac: f64) -> String {
