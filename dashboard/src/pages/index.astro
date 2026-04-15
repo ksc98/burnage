@@ -1,0 +1,424 @@
+---
+export const prerender = false;
+
+import { env } from "cloudflare:workers";
+import Base from "@/layouts/Base.astro";
+import KpiCard from "@/components/KpiCard.astro";
+import Sparkline from "@/components/Sparkline.astro";
+import TokenChart from "@/components/TokenChart";
+import { readUserHash } from "@/lib/cookie";
+import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
+import { getStats, getRecent, type TransactionRow } from "@/lib/store";
+import { estimateCostUsd, fmtInt, fmtUsd, fmtAgo, fmtDuration } from "@/lib/format";
+import { shortToolName } from "@/lib/tools";
+import {
+  MessageSquare,
+  ArrowUpFromLine,
+  Database,
+  DollarSign,
+} from "lucide-react";
+
+const domain = env.DOMAIN ?? "your-proxy";
+
+// Identity resolution priority:
+//   1. Google email (via CF Access) → KV link → user_hash
+//   2. Cookie (manual paste fallback, pre-Access or dev-local)
+//   3. Redirect to /setup
+const cfEmail = readCfAccessEmail(Astro.request);
+const linked = await getLinkedHash(env.SESSION, cfEmail);
+const cookieHash = readUserHash(Astro.request.headers.get("cookie"));
+const userHash = linked ?? cookieHash;
+if (!userHash) return Astro.redirect("/setup");
+
+const ns = env.USER_STORE;
+
+let stats: Awaited<ReturnType<typeof getStats>> | null = null;
+let rows: TransactionRow[] = [];
+let loadErr: string | null = null;
+try {
+  [stats, rows] = await Promise.all([getStats(ns, userHash), getRecent(ns, userHash)]);
+} catch (e) {
+  loadErr = e instanceof Error ? e.message : String(e);
+}
+
+// Chronological: oldest → newest for chart + rolling sparklines
+const chron = [...rows].sort((a, b) => a.ts - b.ts);
+
+const totalCost = rows.reduce((acc, r) => acc + estimateCostUsd(r), 0);
+const sessions = new Set(rows.map((r) => r.session_id).filter(Boolean)).size;
+
+const cacheRate = (() => {
+  if (!stats) return 0;
+  const denom = stats.input_tokens + stats.cache_read + stats.cache_creation;
+  return denom > 0 ? stats.cache_read / denom : 0;
+})();
+
+const avgLatency =
+  rows.length > 0 ? rows.reduce((a, r) => a + r.elapsed_ms, 0) / rows.length : 0;
+
+// Sparklines (chronological)
+const sparkTurns = (() => {
+  if (chron.length < 2) return chron.map((_, i) => i + 1);
+  // Per-minute rate: bucket by minute, trailing 20 buckets
+  const buckets = new Map<number, number>();
+  for (const r of chron) {
+    const m = Math.floor(r.ts / 60_000);
+    buckets.set(m, (buckets.get(m) ?? 0) + 1);
+  }
+  const sorted = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+  return sorted.slice(-20).map(([, n]) => n);
+})();
+const sparkOutput = chron.map((r) => r.output_tokens).slice(-30);
+const sparkCache = (() => {
+  // Rolling-5 cache-read hit ratio
+  const arr: number[] = [];
+  const window: TransactionRow[] = [];
+  for (const r of chron) {
+    window.push(r);
+    if (window.length > 5) window.shift();
+    const d = window.reduce(
+      (a, x) => a + x.input_tokens + x.cache_read + x.cache_creation,
+      0,
+    );
+    const num = window.reduce((a, x) => a + x.cache_read, 0);
+    arr.push(d > 0 ? (num / d) * 100 : 0);
+  }
+  return arr.slice(-30);
+})();
+const sparkCost = chron.map((r) => estimateCostUsd(r)).slice(-30);
+
+// Main chart: skip probe/auth rows, take last 30 real turns. Points are
+// equally spaced on x (categorical), which interpolates across idle gaps —
+// preferred over time-scaled breaks for this dataset since gaps tend to
+// crush the active bands into unreadable slivers.
+const chartData = chron
+  .filter((r) => r.output_tokens > 0 || r.input_tokens > 50)
+  .slice(-30)
+  .map((r) => ({
+    ts: r.ts,
+    input: Math.max(r.input_tokens, 1),
+    output: Math.max(r.output_tokens, 1),
+    cache_read: Math.max(r.cache_read, 1),
+    cache_creation: Math.max(r.cache_creation, 1),
+    cost: estimateCostUsd(r),
+  }));
+
+// Dot color for stop_reason
+function stopDotClass(sr: string | null): string {
+  if (sr === "end_turn") return "dot-good";
+  if (sr === "tool_use") return "dot-muted";
+  if (sr === "max_tokens" || sr === "error") return "dot-danger";
+  if (sr === "stop_sequence") return "dot-warn";
+  return "dot-muted";
+}
+
+// Attribute rows to sessions.
+type SessionAgg = {
+  id: string;
+  turns: number;
+  firstTs: number;
+  lastTs: number;
+  cost: number;
+  output: number;
+  cacheRead: number;
+  models: Map<string, number>;
+};
+const sessionMap = new Map<string, SessionAgg>();
+for (const r of rows) {
+  if (!r.session_id) continue;
+  const cur =
+    sessionMap.get(r.session_id) ??
+    ({
+      id: r.session_id,
+      turns: 0,
+      firstTs: r.ts,
+      lastTs: r.ts,
+      cost: 0,
+      output: 0,
+      cacheRead: 0,
+      models: new Map(),
+    } satisfies SessionAgg);
+  cur.turns += 1;
+  cur.firstTs = Math.min(cur.firstTs, r.ts);
+  cur.lastTs = Math.max(cur.lastTs, r.ts);
+  cur.cost += estimateCostUsd(r);
+  cur.output += r.output_tokens;
+  cur.cacheRead += r.cache_read;
+  if (r.model) {
+    cur.models.set(r.model, (cur.models.get(r.model) ?? 0) + 1);
+  }
+  sessionMap.set(r.session_id, cur);
+}
+const sessionList = [...sessionMap.values()].sort((a, b) => b.lastTs - a.lastTs);
+
+// A session is "active" if its most recent turn lands within this window.
+// 5 minutes mirrors Anthropic's ephemeral prompt-cache TTL and feels right
+// for the "currently being used" signal.
+const ACTIVE_WINDOW_MS = 5 * 60_000;
+const now = Date.now();
+const isActive = (s: SessionAgg) => now - s.lastTs < ACTIVE_WINDOW_MS;
+const activeSession = sessionList.find(isActive) ?? null;
+
+function shortSession(id: string): string {
+  return id.slice(0, 8);
+}
+function sessionModels(s: SessionAgg): string {
+  const top = [...s.models.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (!top) return "—";
+  const name = top[0].replace(/-\d{8}$/, "").replace(/^claude-/, "");
+  return s.models.size > 1 ? `${name} +${s.models.size - 1}` : name;
+}
+---
+
+<Base
+  title="llmetry — overview"
+  headerStats={{
+    spendUsd: totalCost,
+    turns: rows.length,
+    sessions,
+    activeSession: activeSession ? shortSession(activeSession.id) : null,
+  }}
+  activePath="/"
+>
+  <div class="mb-7 flex items-baseline justify-between">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
+      <p class="text-xs text-[var(--color-subtle-foreground)] mt-1">
+        Last {rows.length} transactions
+      </p>
+    </div>
+    <p class="text-xs text-[var(--color-subtle-foreground)] font-mono">{userHash}</p>
+  </div>
+
+  {
+    loadErr && (
+      <div class="mb-6 px-4 py-3 rounded-xl border border-[var(--color-danger-muted)] bg-[var(--color-danger-muted)] text-[var(--color-danger)] text-sm">
+        Failed to load from DO: {loadErr}
+      </div>
+    )
+  }
+
+  {
+    stats && (
+      <section class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" data-live-region="kpis">
+        <KpiCard
+          label="Turns"
+          value={fmtInt(stats.turns)}
+          sub={`${fmtDuration(avgLatency)} avg`}
+          accent="neutral"
+          sparkValues={sparkTurns}
+          sparkMode="line"
+        >
+          <MessageSquare slot="icon" size={16} />
+        </KpiCard>
+        <KpiCard
+          label="Output tokens"
+          value={fmtInt(stats.output_tokens)}
+          sub={`${fmtInt(stats.input_tokens)} input`}
+          accent="volume"
+          sparkValues={sparkOutput}
+          sparkMode="bars"
+        >
+          <ArrowUpFromLine slot="icon" size={16} />
+        </KpiCard>
+        <KpiCard
+          label="Cache hit"
+          value={`${(cacheRate * 100).toFixed(0)}%`}
+          sub={`${fmtInt(stats.cache_read)} read`}
+          accent="volume"
+          sparkValues={sparkCache}
+          sparkMode="line"
+        >
+          <Database slot="icon" size={16} />
+        </KpiCard>
+        <KpiCard
+          label="Cost (window)"
+          value={fmtUsd(totalCost)}
+          sub={`${rows.length} turns · ${sessions} sessions`}
+          accent="money"
+          sparkValues={sparkCost}
+          sparkMode="bars"
+        >
+          <DollarSign slot="icon" size={16} />
+        </KpiCard>
+      </section>
+    )
+  }
+
+  {
+    chartData.length > 0 && (
+      <section class="card p-5 mb-8">
+        <div class="flex items-baseline justify-between mb-1">
+          <h2 class="text-sm font-medium">Tokens &amp; cost over time</h2>
+          <div class="flex items-center gap-3 text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)]">
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-1)]" /> cache read
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-2)]" /> cache create
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-4)]" /> output
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-5)]" /> input
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-0.5 bg-[var(--color-money)]" /> cost ($)
+            </span>
+          </div>
+        </div>
+        <p class="text-xs text-[var(--color-subtle-foreground)] mb-4">
+          Stacked token composition (log scale) with per-turn cost overlay. Last {chartData.length} turns.
+        </p>
+        <TokenChart client:load data={chartData} />
+      </section>
+    )
+  }
+
+  {
+    sessionList.length > 0 && (
+      <section class="mb-8" data-live-region="sessions">
+        <div class="flex items-baseline justify-between mb-3">
+          <h2 class="text-sm font-medium">By session</h2>
+          <span class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
+            {sessionList.length} sessions
+          </span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+          {sessionList.slice(0, 8).map((s) => {
+            const active = isActive(s);
+            return (
+            <div class={`card card-hover p-4 ${active ? "ring-1 ring-[var(--color-good-muted)] ring-offset-0" : ""}`}>
+              <div class="flex items-baseline justify-between mb-2.5">
+                <div class="flex items-center gap-2">
+                  <code class="font-mono text-xs text-[var(--color-volume)]">{shortSession(s.id)}</code>
+                  {active && (
+                    <span class="flex items-center gap-1 text-[0.625rem] uppercase tracking-wider text-[var(--color-good)]">
+                      <span class="live-dot" />
+                      active
+                    </span>
+                  )}
+                </div>
+                <span class="text-[0.6875rem] uppercase tracking-wider text-[var(--color-subtle-foreground)]">
+                  <span data-ts={s.lastTs} data-ts-suffix=" ago">{fmtAgo(s.lastTs)} ago</span>
+                </span>
+              </div>
+              <div class="flex items-end justify-between">
+                <div>
+                  <p class="font-mono text-xl font-semibold tabular-nums">
+                    {s.turns}
+                    <span class="text-[var(--color-subtle-foreground)] text-xs font-normal ml-1">turns</span>
+                  </p>
+                  <p class="text-xs text-[var(--color-muted-foreground)] mt-1 font-mono">
+                    {sessionModels(s)}
+                  </p>
+                </div>
+                <div class="text-right">
+                  <p class="font-mono text-sm tabular-nums text-[var(--color-money)]">{fmtUsd(s.cost)}</p>
+                  <p class="text-xs text-[var(--color-subtle-foreground)] tabular-nums mt-1">
+                    {fmtDuration(s.lastTs - s.firstTs)}
+                  </p>
+                </div>
+              </div>
+            </div>
+          );
+          })}
+        </div>
+      </section>
+    )
+  }
+
+  <section class="card overflow-hidden" data-live-region="table">
+    <div class="flex items-baseline justify-between px-5 py-4 border-b border-[var(--color-border)]">
+      <h2 class="text-sm font-medium">Recent turns</h2>
+      <span class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
+        {rows.length} rows
+      </span>
+    </div>
+    {
+      rows.length === 0 ? (
+        <p class="px-5 py-10 text-[var(--color-muted-foreground)] text-sm text-center">
+          No transactions yet. Run <code class="chip mx-0.5">claude</code> against
+          <code class="chip mx-0.5">{domain}</code> to see them here.
+        </p>
+      ) : (
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-[13px]">
+            <thead class="text-[var(--color-muted-foreground)] text-[0.6875rem] uppercase tracking-[0.08em]">
+              <tr>
+                <th class="px-4 py-2.5 text-left font-medium w-3"></th>
+                <th class="px-3 py-2.5 text-left font-medium w-14">When</th>
+                <th class="px-3 py-2.5 text-left font-medium">Model</th>
+                <th class="px-3 py-2.5 text-right font-medium tabular-nums">In</th>
+                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Out</th>
+                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Cache R</th>
+                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Latency</th>
+                <th class="px-3 py-2.5 text-left font-medium">Tools</th>
+                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const toolsArr: string[] = r.tools_json ? JSON.parse(r.tools_json) : [];
+                const tools = toolsArr.map(shortToolName);
+                const cost = estimateCostUsd(r);
+                const model = r.model ?? "—";
+                const shortModel = model.replace(/-\d{8}$/, "").replace(/^claude-/, "");
+                return (
+                  <tr class="border-t border-[var(--color-border)] hover:bg-[var(--color-card-elevated)]/60 transition-colors">
+                    <td class="px-4 py-2.5 align-middle">
+                      <span
+                        class={`dot ${stopDotClass(r.stop_reason)}`}
+                        title={r.stop_reason ?? "—"}
+                      ></span>
+                    </td>
+                    <td class="px-3 py-2.5 text-[var(--color-muted-foreground)] font-mono text-xs tabular-nums whitespace-nowrap">
+                      <span data-ts={r.ts}>{fmtAgo(r.ts)}</span>
+                    </td>
+                    <td class="px-3 py-2.5 font-mono text-xs" title={model}>
+                      {shortModel}
+                    </td>
+                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
+                      {fmtInt(r.input_tokens)}
+                    </td>
+                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
+                      {fmtInt(r.output_tokens)}
+                    </td>
+                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/80">
+                      {fmtInt(r.cache_read)}
+                    </td>
+                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+                      {fmtDuration(r.elapsed_ms)}
+                    </td>
+                    <td class="px-3 py-2.5">
+                      {tools.length === 0 ? (
+                        <span class="text-[var(--color-subtle-foreground)] text-xs">—</span>
+                      ) : (
+                        <div class="flex flex-wrap gap-1 max-w-[22rem]">
+                          {tools.slice(0, 3).map((t) => (
+                            <span class="chip" title={t}>
+                              {t.length > 22 ? t.slice(0, 22) + "…" : t}
+                            </span>
+                          ))}
+                          {tools.length > 3 && (
+                            <span class="chip" title={tools.slice(3).join(", ")}>
+                              +{tools.length - 3}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-[var(--color-money)]">
+                      {fmtUsd(cost)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </section>
+</Base>

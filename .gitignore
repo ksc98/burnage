@@ -3,3 +3,12 @@ build/
 node_modules/
 .wrangler/
 *.log
+
+# Deployment-specific (domain, salts, etc.) — never committed.
+.env
+.env.local
+.dev.vars
+
+# Astro build artifacts
+dashboard/dist/
+dashboard/.astro/

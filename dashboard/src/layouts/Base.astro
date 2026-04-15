@@ -1,0 +1,162 @@
+---
+import "@/styles/global.css";
+
+interface Props {
+  title?: string;
+  headerStats?: {
+    spendUsd: number;
+    turns: number;
+    sessions: number;
+    activeSession?: string | null;
+  };
+  activePath?: string;
+}
+const { title = "llmetry", headerStats, activePath = "/" } = Astro.props;
+
+function fmtUsd(n: number): string {
+  if (n === 0) return "$0.00";
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(2)}`;
+}
+
+const navItems: { href: string; label: string }[] = [
+  { href: "/", label: "Overview" },
+  { href: "/setup", label: "Setup" },
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <header class="sticky top-0 z-20 backdrop-blur-xl bg-[var(--color-background)]/80 border-b border-[var(--color-border)]">
+      <div class="mx-auto max-w-7xl px-6 h-14 flex items-center justify-between gap-6">
+        <div class="flex items-center gap-6">
+          <a href="/" class="flex items-center gap-2">
+            <span class="inline-block w-2.5 h-2.5 rounded-sm bg-[var(--color-money)]"></span>
+            <span class="text-[0.95rem] font-semibold tracking-tight">llmetry</span>
+            <span class="text-xs text-[var(--color-muted-foreground)] hidden sm:inline">/ Claude Code observability</span>
+          </a>
+          {
+            headerStats && (
+              <div class="hidden md:flex items-center gap-3 pl-4 border-l border-[var(--color-border)] text-xs text-[var(--color-muted-foreground)]">
+                {headerStats.activeSession ? (
+                  <span class="flex items-center gap-1.5">
+                    <span class="live-dot" />
+                    <span class="font-medium text-[var(--color-good)]">active</span>
+                    <code class="font-mono text-[var(--color-foreground)] text-[0.6875rem]">
+                      {headerStats.activeSession}
+                    </code>
+                  </span>
+                ) : (
+                  <span class="flex items-center gap-1.5">
+                    <span class="inline-block w-2 h-2 rounded-full bg-[var(--color-subtle-foreground)]" />
+                    <span class="font-medium text-[var(--color-muted-foreground)]">idle</span>
+                  </span>
+                )}
+                <span class="text-[var(--color-subtle-foreground)]">·</span>
+                <span class="tabular-nums font-mono">
+                  <span class="text-[var(--color-money)] font-medium">{fmtUsd(headerStats.spendUsd)}</span>
+                </span>
+                <span class="text-[var(--color-subtle-foreground)]">·</span>
+                <span class="tabular-nums font-mono">{headerStats.turns} turns</span>
+                <span class="text-[var(--color-subtle-foreground)]">·</span>
+                <span class="tabular-nums font-mono">{headerStats.sessions} sessions</span>
+              </div>
+            )
+          }
+        </div>
+        <nav class="flex gap-1 text-sm">
+          {
+            navItems.map((item) => {
+              const active = item.href === activePath;
+              return (
+                <a
+                  href={item.href}
+                  class:list={[
+                    "px-3 py-1.5 rounded-md transition-colors",
+                    active
+                      ? "text-[var(--color-foreground)] bg-[var(--color-card)]"
+                      : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)] hover:bg-[var(--color-card)]",
+                  ]}
+                >
+                  {item.label}
+                </a>
+              );
+            })
+          }
+        </nav>
+      </div>
+    </header>
+    <main class="mx-auto max-w-7xl px-6 py-8">
+      <slot />
+    </main>
+
+    <script>
+      // --- 1-second ticker for every [data-ts] element. ---
+      // Updates inner text to the current "Xs / Xm / Xh / Xd" ago value.
+      function fmtAgo(ms: number): string {
+        const diff = Date.now() - ms;
+        const s = Math.max(0, Math.floor(diff / 1000));
+        if (s < 60) return `${s}s`;
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m}m`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `${h}h`;
+        return `${Math.floor(h / 24)}d`;
+      }
+      function refreshAges() {
+        document.querySelectorAll<HTMLElement>("[data-ts]").forEach((el) => {
+          const ts = Number(el.dataset.ts);
+          if (!Number.isFinite(ts)) return;
+          const suffix = el.dataset.tsSuffix ?? "";
+          el.textContent = fmtAgo(ts) + suffix;
+        });
+      }
+      setInterval(refreshAges, 1000);
+
+      // --- 10-second live refresh. ---
+      // Fetches the current page, parses, and swaps every [data-live-region]
+      // block in place. The chart section is excluded so the React island
+      // keeps its state.
+      const POLL_MS = 10_000;
+      let polling = false;
+      async function pollRefresh() {
+        if (polling || document.hidden) return;
+        polling = true;
+        try {
+          const res = await fetch(window.location.pathname, {
+            credentials: "include",
+            headers: { Accept: "text/html" },
+            cache: "no-store",
+          });
+          if (!res.ok) return;
+          const html = await res.text();
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          const freshRegions = doc.querySelectorAll<HTMLElement>("[data-live-region]");
+          freshRegions.forEach((fresh) => {
+            const name = fresh.getAttribute("data-live-region");
+            if (!name) return;
+            const target = document.querySelector(`[data-live-region="${name}"]`);
+            if (target) target.innerHTML = fresh.innerHTML;
+          });
+          refreshAges();
+        } catch (e) {
+          // swallow — next tick will retry
+        } finally {
+          polling = false;
+        }
+      }
+      setInterval(pollRefresh, POLL_MS);
+      // Also refresh immediately on tab focus so you don't see stale data.
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) pollRefresh();
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,61 @@
+---
+import Sparkline from "./Sparkline.astro";
+
+interface Props {
+  label: string;
+  value: string;
+  sub?: string;
+  accent?: "volume" | "money" | "neutral";
+  sparkValues?: number[];
+  sparkMode?: "line" | "bars";
+}
+
+const {
+  label,
+  value,
+  sub,
+  accent = "neutral",
+  sparkValues = [],
+  sparkMode = "line",
+} = Astro.props;
+
+const sparkColor =
+  accent === "money"
+    ? "var(--color-money)"
+    : accent === "volume"
+      ? "var(--color-volume)"
+      : "var(--color-muted-foreground)";
+
+const valueClass =
+  accent === "money"
+    ? "text-[var(--color-money)]"
+    : "text-[var(--color-foreground)]";
+---
+
+<div class="card card-hover p-5">
+  <div class="flex items-start justify-between mb-4">
+    <p class="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)] font-medium">
+      {label}
+    </p>
+    <div class="text-[var(--color-muted-foreground)]">
+      <slot name="icon" />
+    </div>
+  </div>
+  <div class="flex items-end justify-between gap-3">
+    <div>
+      <p class={`font-mono text-3xl font-semibold tracking-tight tabular-nums ${valueClass}`}>
+        {value}
+      </p>
+      {sub && (
+        <p class="text-xs text-[var(--color-subtle-foreground)] mt-1 tabular-nums">
+          {sub}
+        </p>
+      )}
+    </div>
+    {sparkValues.length > 1 && (
+      <div class="opacity-90">
+        <Sparkline values={sparkValues} mode={sparkMode} color={sparkColor} />
+      </div>
+    )}
+  </div>
+</div>

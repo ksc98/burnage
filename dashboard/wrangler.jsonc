@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "claudemetry",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+
+  // Custom domain is injected at deploy time from $DOMAIN (see justfile)
+  // so the public repo stays deployment-agnostic. CF Access (Google IdP)
+  // is configured on the deployed hostname in Zero Trust, with path
+  // Bypass rules for /v1/* and /_cm/* so the proxy stays reachable to
+  // Claude Code clients that can't do Google sign-in.
+
+  // Bind to the UserStore DO class hosted inside the cc-proxy worker.
+  // script_name makes this a cross-worker binding: we get a stub into
+  // cc-proxy's namespace without hosting the DO class ourselves.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "USER_STORE",
+        "class_name": "UserStore",
+        "script_name": "cc-proxy"
+      }
+    ]
+  },
+
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": true },
+    "traces": { "enabled": true }
+  }
+}

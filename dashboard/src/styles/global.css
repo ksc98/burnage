@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    "Geist Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+
+  /* Surfaces — near-black with a hint of cool blue, not pure grey. */
+  --color-background: oklch(0.145 0.015 260);
+  --color-card: oklch(0.185 0.015 260);
+  --color-card-elevated: oklch(0.215 0.015 260);
+
+  /* Foregrounds. */
+  --color-foreground: oklch(0.97 0.005 260);
+  --color-muted-foreground: oklch(0.65 0.02 260);
+  --color-subtle-foreground: oklch(0.48 0.02 260);
+
+  /* Borders and dividers — always via white/opacity for consistency. */
+  --color-border: oklch(1 0 0 / 0.08);
+  --color-border-strong: oklch(1 0 0 / 0.14);
+
+  /* Semantic accents. Orange = money/cost only. Cool = volume/tokens. */
+  --color-money: oklch(0.78 0.16 60);
+  --color-money-muted: oklch(0.78 0.16 60 / 0.15);
+  --color-volume: oklch(0.75 0.14 230);
+  --color-volume-muted: oklch(0.75 0.14 230 / 0.18);
+
+  /* Status. */
+  --color-good: oklch(0.78 0.16 155);
+  --color-good-muted: oklch(0.78 0.16 155 / 0.16);
+  --color-warn: oklch(0.82 0.15 85);
+  --color-warn-muted: oklch(0.82 0.15 85 / 0.16);
+  --color-danger: oklch(0.7 0.2 25);
+  --color-danger-muted: oklch(0.7 0.2 25 / 0.16);
+
+  /* Chart palette — derived, muted; used for series colors in Recharts. */
+  --color-chart-1: oklch(0.72 0.14 230);
+  --color-chart-2: oklch(0.74 0.14 175);
+  --color-chart-3: oklch(0.78 0.16 60);
+  --color-chart-4: oklch(0.72 0.14 310);
+  --color-chart-5: oklch(0.78 0.16 155);
+}
+
+:root {
+  color-scheme: dark;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+/* Card surface primitive — subtle inset highlight, soft border. */
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.04);
+}
+
+.card-hover {
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.card-hover:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-card-elevated);
+}
+
+/* Chip / badge. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 1.375rem;
+  padding: 0 0.5rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  border-radius: 999px;
+  background: oklch(1 0 0 / 0.05);
+  color: var(--color-muted-foreground);
+  border: 1px solid oklch(1 0 0 / 0.06);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* Status dot (stop_reason). */
+.dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+.dot-muted { background: var(--color-subtle-foreground); }
+.dot-good { background: var(--color-good); box-shadow: 0 0 6px 0 var(--color-good-muted); }
+.dot-warn { background: var(--color-warn); box-shadow: 0 0 6px 0 var(--color-warn-muted); }
+.dot-danger { background: var(--color-danger); box-shadow: 0 0 6px 0 var(--color-danger-muted); }
+
+/* Live indicator. */
+.live-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--color-good);
+  box-shadow: 0 0 0 0 var(--color-good-muted);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(0.78 0.16 155 / 0.4); }
+  50% { box-shadow: 0 0 0 4px oklch(0.78 0.16 155 / 0); }
+}
+
+/* Scrollbar — thin, dark. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 0.08); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 0.14); }
