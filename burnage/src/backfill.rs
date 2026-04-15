@@ -5,6 +5,7 @@
 use anyhow::{anyhow, Result};
 use crossterm::style::Stylize;
 use serde_json::Value;
+use std::io::Write;
 
 pub struct BackfillOpts {
     pub base: String,
@@ -29,6 +30,14 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
         if let Some(ts) = before_ts {
             body["before_ts"] = serde_json::json!(ts);
         }
+
+        // Each batch does batch_size sequential Workers AI embeds + upserts,
+        // so a full batch can take 15–30s before we see the response. Print
+        // a pre-flight line (no newline, flushed) so the user sees that
+        // we're blocked on the server, not hung.
+        let pre = format!("  {} requesting…", format!("batch {page}").dark_grey());
+        print!("\r{pre}");
+        let _ = std::io::stdout().flush();
 
         let resp = ureq::post(&url).set("Authorization", &auth).send_json(body);
         let text = match resp {
