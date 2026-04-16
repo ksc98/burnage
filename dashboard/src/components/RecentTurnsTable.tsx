@@ -637,54 +637,44 @@ export default function RecentTurnsTable({
     [summaries, turnsBySession],
   );
 
-  // Auto-expand any newly-appeared active sessions, mirroring the old
-  // behavior when rows flowed in from the global /recent dump.
-  // Also re-expand sessions that were previously inactive and are now active
-  // again (i.e. a resumed session).
-  React.useEffect(() => {
-    setExpanded((prev) => {
-      if (typeof prev !== "object" || prev == null) return prev;
-      const p = prev as Record<string, boolean>;
-      const next = { ...p };
-      let changed = false;
-      for (const s of summaries) {
-        const gid = `g:${s.id}`;
-        if (!s.active) continue;
-        // New session we haven't seen, or a resumed session (was inactive, now active)
-        const isNew = !seenIds.current.has(gid);
-        const isResumed = !isNew && !prevActiveIds.current.has(s.id);
-        if (isNew || isResumed) {
-          seenIds.current.add(gid);
-          next[gid] = true;
-          changed = true;
-        } else {
-          seenIds.current.add(gid);
-        }
-      }
-      // Also track non-active sessions as seen
-      for (const s of summaries) {
-        seenIds.current.add(`g:${s.id}`);
-      }
-      return changed ? next : prev;
-    });
-  }, [summaries]);
-
-  // Auto-collapse sessions that just ended (active → inactive transition).
+  // Auto-expand newly active / resumed sessions and auto-collapse sessions
+  // that just ended.  Merged into a single effect so transition detection
+  // reads refs synchronously *before* React 18 batches the queued
+  // setExpanded updater — two separate effects race because the updater
+  // runs after ALL effect bodies complete, by which time the second effect
+  // has already mutated prevActiveIds.
   React.useEffect(() => {
     const nowActive = new Set(
       summaries.filter((s) => s.active).map((s) => s.id),
     );
-    const justEnded: string[] = [];
-    for (const id of prevActiveIds.current) {
-      if (!nowActive.has(id)) justEnded.push(id);
+
+    // --- detect transitions using current (pre-mutation) refs ---
+    const toExpand: string[] = [];
+    for (const s of summaries) {
+      const gid = `g:${s.id}`;
+      if (!s.active) continue;
+      const isNew = !seenIds.current.has(gid);
+      const isResumed = !isNew && !prevActiveIds.current.has(s.id);
+      if (isNew || isResumed) toExpand.push(gid);
     }
+
+    const toCollapse: string[] = [];
+    for (const id of prevActiveIds.current) {
+      if (!nowActive.has(id)) toCollapse.push(`g:${id}`);
+    }
+
+    // --- update refs (before the queued updater runs) ---
+    for (const s of summaries) seenIds.current.add(`g:${s.id}`);
     prevActiveIds.current = nowActive;
-    if (justEnded.length === 0) return;
+
+    // --- apply expand / collapse ---
+    if (toExpand.length === 0 && toCollapse.length === 0) return;
     setExpanded((prev) => {
       if (typeof prev !== "object" || prev == null) return prev;
       const p = prev as Record<string, boolean>;
       const next = { ...p };
-      for (const id of justEnded) next[`g:${id}`] = false;
+      for (const gid of toExpand) next[gid] = true;
+      for (const gid of toCollapse) next[gid] = false;
       return next;
     });
   }, [summaries]);
