@@ -15,7 +15,7 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
   │  cc-proxy (Rust Worker)                                  │
   │                                                          │
   │   identify    →  GET /oauth/profile   (KV cache, 1h TTL) │
-  │                  user_hash = sha256(salt ‖ uuid)[:8]     │
+  │                  user_hash = sha256(salt ‖ email)[:8]    │
   │                                                          │
   │   ── before upstream fetch ────────────────────────────  │
   │   stub.fetch("/ingest/start")  placeholder row,          │
@@ -144,14 +144,14 @@ Every request carries either an OAuth Bearer token (the usual Claude Code case) 
 ```
 if   Bearer (OAuth)  →  GET https://api.anthropic.com/api/oauth/profile
                          (cached in KV under tok:<token_id>, TTL 1h)
-                         user_hash = hex(sha256(SALT ‖ "uuid:" ‖ account.uuid))[:16]
+                         user_hash = hex(sha256(SALT ‖ "email:" ‖ account.email))[:16]
 
 if   x-api-key       →  user_hash = hex(sha256(SALT ‖ "apikey:" ‖ key))[:16]
 
 else                  →  skip persistence
 ```
 
-Anthropic's `account.uuid` is immutable per-account, so `user_hash` is genuinely stable across OAuth refreshes, devices, and months of use. The first request after a token refresh costs one ~150 ms profile fetch; everything after hits the KV cache. Two Anthropic accounts always produce two different hashes (and two different Durable Objects). The raw bearer is never stored or logged.
+The profile endpoint returns both `account.uuid` and `account.email`; the hash derives from email because email is the same identity the dashboard's Google SSO / CF Access layer sees — no separate linking table needed. Email is stable across OAuth refreshes, devices, and months of use; the first request after a token refresh costs one ~150 ms profile fetch, everything after hits the KV cache. Two Anthropic accounts always produce two different hashes (and two different Durable Objects). The raw bearer is never stored or logged.
 
 As a side-effect, every resolved request writes `link:<email> = user_hash` into the same KV namespace. The dashboard (gated by Cloudflare Access on the same email) reads that link to auto-scope itself to your DO — no `/setup` page, no copy-pasting.
 
