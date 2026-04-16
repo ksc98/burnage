@@ -893,6 +893,8 @@ export default function RecentTurnsTable({
               for (const row of allRows) {
                 if (!isLeaf(row.original)) {
                   const g = row.original;
+                  /* ---- build visible-column list for session header ---- */
+                  const visCols = table.getVisibleLeafColumns().map((c) => c.id);
                   out.push(
                     <TableRow
                       key={row.id}
@@ -904,78 +906,108 @@ export default function RecentTurnsTable({
                         });
                       }}
                     >
-                      <TableCell className="pl-4 pr-1 w-4 align-middle">
-                        {row.getIsExpanded() ? (
-                          <ChevronDown
-                            size={14}
-                            className="text-[var(--color-subtle-foreground)]"
-                          />
-                        ) : (
-                          <ChevronRight
-                            size={14}
-                            className="text-[var(--color-subtle-foreground)]"
-                          />
-                        )}
-                      </TableCell>
-                      <TableCell
-                        colSpan={Math.max(1, visibleColCount - 1)}
-                        className="py-2"
-                      >
-                        <div className="flex items-center gap-3 text-xs">
-                          {g.sessionId ? (
-                            <a
-                              href={`/session/${g.sessionId}`}
-                              onClick={(e) => e.stopPropagation()}
-                              className="font-mono text-[var(--color-volume)] hover:underline hover:text-[var(--color-foreground)] inline-flex items-center gap-1"
-                              title="Open session detail"
-                            >
-                              <code>{shortSession(g.sessionId)}</code>
-                              <ChevronRight size={11} className="opacity-60" />
-                            </a>
-                          ) : (
-                            <span className="text-[var(--color-subtle-foreground)] italic">
-                              (no session)
-                            </span>
-                          )}
-                          <span className="text-[var(--color-muted-foreground)] tabular-nums">
-                            {g.turns} {g.turns === 1 ? "turn" : "turns"}
-                          </span>
-                          {g.lastTs > g.firstTs && (
-                            <>
-                              <span className="text-[var(--color-subtle-foreground)]">
-                                ·
-                              </span>
-                              <span className="text-[var(--color-muted-foreground)] tabular-nums">
-                                {fmtDuration(g.lastTs - g.firstTs)}
-                              </span>
-                            </>
-                          )}
-                          {g.cost > 0 && (
-                            <>
-                              <span className="text-[var(--color-subtle-foreground)]">
-                                ·
-                              </span>
-                              <span className="text-[var(--color-money)] tabular-nums font-mono">
-                                {fmtUsd(g.cost)}
-                              </span>
-                            </>
-                          )}
-                          {g.models.size > 0 && (
-                            <>
-                              <span className="text-[var(--color-subtle-foreground)]">
-                                ·
-                              </span>
-                              <ModelMixInline
-                                models={g.models}
-                                turns={g.turns}
-                                colorFor={(m) =>
-                                  modelColors.get(m) ?? MODEL_PALETTE[0]
-                                }
-                              />
-                            </>
-                          )}
-                        </div>
-                      </TableCell>
+                      {visCols.map((colId) => {
+                        switch (colId) {
+                          /* ── chevron ── */
+                          case "expand":
+                            return (
+                              <TableCell key={colId} className="pl-4 pr-1 w-4 align-middle">
+                                {row.getIsExpanded() ? (
+                                  <ChevronDown
+                                    size={14}
+                                    className="text-[var(--color-subtle-foreground)]"
+                                  />
+                                ) : (
+                                  <ChevronRight
+                                    size={14}
+                                    className="text-[var(--color-subtle-foreground)]"
+                                  />
+                                )}
+                              </TableCell>
+                            );
+                          /* ── dot → empty ── */
+                          case "dot":
+                            return <TableCell key={colId} className="px-2 w-3" />;
+                          /* ── when → empty ── */
+                          case "when":
+                            return <TableCell key={colId} className="w-14" />;
+                          /* ── model → session id + turns + duration + model mix ── */
+                          case "model":
+                            return (
+                              <TableCell key={colId} className="py-2" colSpan={
+                                /* span model through cache_read so the group stays compact */
+                                (() => {
+                                  const from = visCols.indexOf("model");
+                                  const spanIds = ["model", "in", "out", "cache_read", "cache_creation"];
+                                  let count = 0;
+                                  for (let i = from; i < visCols.length; i++) {
+                                    if (spanIds.includes(visCols[i])) count++;
+                                    else break;
+                                  }
+                                  return Math.max(1, count);
+                                })()
+                              }>
+                                <div className="flex items-center gap-2 text-xs">
+                                  {g.sessionId ? (
+                                    <a
+                                      href={`/session/${g.sessionId}`}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="font-mono text-[var(--color-volume)] hover:underline hover:text-[var(--color-foreground)] inline-flex items-center gap-1"
+                                      title="Open session detail"
+                                    >
+                                      <code>{shortSession(g.sessionId)}</code>
+                                      <ChevronRight size={11} className="opacity-60" />
+                                    </a>
+                                  ) : (
+                                    <span className="text-[var(--color-subtle-foreground)] italic">
+                                      (no session)
+                                    </span>
+                                  )}
+                                  <span className="inline-block w-[4ch] text-right font-mono tabular-nums text-[var(--color-muted-foreground)]">
+                                    {g.turns}
+                                  </span>
+                                  <span className="text-[var(--color-muted-foreground)]">
+                                    {g.turns === 1 ? "turn" : "turns"}
+                                  </span>
+                                  {g.lastTs > g.firstTs && (
+                                    <span className="inline-block w-[6ch] text-right font-mono tabular-nums text-[var(--color-muted-foreground)]">
+                                      {fmtDuration(g.lastTs - g.firstTs)}
+                                    </span>
+                                  )}
+                                  {g.models.size > 0 && (
+                                    <ModelMixInline
+                                      models={g.models}
+                                      turns={g.turns}
+                                      colorFor={(m) =>
+                                        modelColors.get(m) ?? MODEL_PALETTE[0]
+                                      }
+                                    />
+                                  )}
+                                </div>
+                              </TableCell>
+                            );
+                          /* ── skip columns consumed by model colSpan ── */
+                          case "in":
+                          case "out":
+                          case "cache_read":
+                          case "cache_creation":
+                            return null;
+                          /* ── cost → session total cost ── */
+                          case "cost":
+                            return (
+                              <TableCell key={colId} className="py-2">
+                                {g.cost > 0 && (
+                                  <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-money)]">
+                                    {fmtUsd(g.cost)}
+                                  </span>
+                                )}
+                              </TableCell>
+                            );
+                          /* ── every other column → empty cell ── */
+                          default:
+                            return <TableCell key={colId} />;
+                        }
+                      })}
                     </TableRow>,
                   );
                   const sidForLoad = g.sessionId;
