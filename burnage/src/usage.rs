@@ -1,44 +1,40 @@
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration, TimeZone, Utc};
-use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use chrono::{DateTime, TimeZone, Utc};
+use serde_json::Value;
 use std::io::IsTerminal;
 
 use crate::quota::{
     bar, format_pct, human_bytes, human_count, Style, BAR_WIDTH, DO_STORAGE_LIMIT,
 };
 
-const CC_PROXY_SCRIPT: &str = "cc-proxy";
-
 pub fn do_run(base: &str, token: &str) -> Result<()> {
-    // Fire /stats + /whoami + user-count in parallel. stats/whoami go
-    // through the proxy to the DO; user-count hits the CF GraphQL API.
-    // All three are independent — no reason to pay their latencies back
-    // to back.
+    // Fire /stats + /whoami + /user-count in parallel. All three go
+    // through the proxy and are independent — no reason to pay their
+    // latencies back to back. User-count counts `link:<email>` keys in
+    // KV (one per Anthropic account the proxy has ever seen); this is
+    // the honest figure. The prior implementation used CF GraphQL's
+    // `durableObjectsInvocationsAdaptiveGroups` objectId count, which
+    // inflated with ghost DOs.
     let base_s = base.to_string();
     let token_s = token.to_string();
     let b1 = base_s.clone();
     let t1 = token_s.clone();
     let b2 = base_s.clone();
     let t2 = token_s.clone();
+    let b3 = base_s.clone();
+    let t3 = token_s.clone();
     let results = crate::parallel::scatter::<Value>(vec![
         Box::new(move || gh_get(&b1, &t1, "/_cm/stats")),
         Box::new(move || gh_get(&b2, &t2, "/_cm/whoami")),
-        // Wrap user-count into a Value so all three tasks share a return
-        // type. Failures become Null (matches the existing `.unwrap_or(None)`
-        // behavior — user-count is best-effort info, never fatal).
-        Box::new(move || {
-            Ok(match fetch_user_count(CC_PROXY_SCRIPT) {
-                Ok(Some(n)) => json!(n),
-                _ => Value::Null,
-            })
-        }),
+        Box::new(move || Ok(gh_get(&b3, &t3, "/_cm/user-count").unwrap_or(Value::Null))),
     ]);
     let mut it = results.into_iter();
     let stats = it.next().unwrap()?;
     let whoami = it.next().unwrap()?;
     let user_count_val = it.next().unwrap()?;
-    let user_count = user_count_val.as_u64();
+    let user_count = user_count_val
+        .get("users")
+        .and_then(|v| v.as_u64());
 
     let user_hash = whoami
         .get("user_hash")
@@ -189,62 +185,6 @@ fn i64_at(v: &Value, key: &str) -> i64 {
     v.get(key)
         .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
         .unwrap_or(0)
-}
-
-/// Distinct DO objectIds (= distinct users) for the given script in the last 30 days.
-/// Returns None if CF_API_TOKEN or CF_ACCOUNT_ID is not set.
-fn fetch_user_count(script: &str) -> Result<Option<u64>> {
-    let Ok(token) = std::env::var("CF_API_TOKEN") else {
-        return Ok(None);
-    };
-    let Ok(acct) = std::env::var("CF_ACCOUNT_ID") else {
-        return Ok(None);
-    };
-    let now = Utc::now();
-    let from = (now - Duration::days(30))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    let to = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let q = r#"query U($acct:String!,$from:Time!,$to:Time!,$script:String!){
-      viewer{accounts(filter:{accountTag:$acct}){
-        durableObjectsInvocationsAdaptiveGroups(
-          filter:{datetime_geq:$from,datetime_leq:$to,scriptName:$script},
-          limit:10000
-        ){
-          dimensions{objectId}
-        }
-      }}
-    }"#;
-    let body = json!({
-        "query": q,
-        "variables": { "acct": acct, "from": from, "to": to, "script": script }
-    });
-    let res = ureq::post("https://api.cloudflare.com/client/v4/graphql")
-        .set("Authorization", &format!("Bearer {token}"))
-        .set("Content-Type", "application/json")
-        .send_json(body);
-    let text = match res {
-        Ok(r) => r.into_string().context("reading cf response")?,
-        Err(_) => return Ok(None),
-    };
-    let v: Value = serde_json::from_str(&text).context("parsing cf response")?;
-    let rows = v
-        .pointer("/data/viewer/accounts/0/durableObjectsInvocationsAdaptiveGroups")
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for r in rows {
-        if let Some(id) = r
-            .pointer("/dimensions/objectId")
-            .and_then(|x| x.as_str())
-        {
-            if !id.is_empty() {
-                seen.insert(id.to_string());
-            }
-        }
-    }
-    Ok(Some(seen.len() as u64))
 }
 
 /// Append a Vectorize summary to the `burnage quota` top-down view. Requires

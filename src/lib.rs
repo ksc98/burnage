@@ -297,6 +297,42 @@ async fn admin_route(
         }));
     }
 
+    // "How many users does this deployment serve?" — counted by distinct
+    // `link:<email>` entries in KV. This is the honest count: every
+    // successfully-resolved OAuth request writes its email's link, so the
+    // cardinality of that prefix is exactly "users with at least one
+    // ingested turn." Avoids the CF-analytics-objectId count burnage was
+    // using, which inflated with ghost DOs.
+    if path == "/_cm/user-count" && method == &Method::Get {
+        let kv = match env.kv("SESSION") {
+            Ok(kv) => kv,
+            Err(_) => return Response::error("SESSION KV not bound", 500),
+        };
+        let mut total: u64 = 0;
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut builder = kv.list().prefix("link:".to_string()).limit(1000);
+            if let Some(c) = cursor.take() {
+                builder = builder.cursor(c);
+            }
+            let resp = match builder.execute().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return Response::error(format!("kv list: {e:?}"), 500);
+                }
+            };
+            total += resp.keys.len() as u64;
+            if resp.list_complete {
+                break;
+            }
+            match resp.cursor {
+                Some(c) if !c.is_empty() => cursor = Some(c),
+                _ => break,
+            }
+        }
+        return Response::from_json(&json!({ "users": total }));
+    }
+
     // One-shot merge of the caller's pre-email-flip DO (uuid-keyed) into
     // their current (email-keyed) DO. Idempotent — re-running copies nothing
     // new. Source DO's data is dropped after a successful copy so the
