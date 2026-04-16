@@ -639,6 +639,8 @@ export default function RecentTurnsTable({
 
   // Auto-expand any newly-appeared active sessions, mirroring the old
   // behavior when rows flowed in from the global /recent dump.
+  // Also re-expand sessions that were previously inactive and are now active
+  // again (i.e. a resumed session).
   React.useEffect(() => {
     setExpanded((prev) => {
       if (typeof prev !== "object" || prev == null) return prev;
@@ -647,12 +649,21 @@ export default function RecentTurnsTable({
       let changed = false;
       for (const s of summaries) {
         const gid = `g:${s.id}`;
-        if (seenIds.current.has(gid)) continue;
-        seenIds.current.add(gid);
-        if (s.active) {
+        if (!s.active) continue;
+        // New session we haven't seen, or a resumed session (was inactive, now active)
+        const isNew = !seenIds.current.has(gid);
+        const isResumed = !isNew && !prevActiveIds.current.has(s.id);
+        if (isNew || isResumed) {
+          seenIds.current.add(gid);
           next[gid] = true;
           changed = true;
+        } else {
+          seenIds.current.add(gid);
         }
+      }
+      // Also track non-active sessions as seen
+      for (const s of summaries) {
+        seenIds.current.add(`g:${s.id}`);
       }
       return changed ? next : prev;
     });
