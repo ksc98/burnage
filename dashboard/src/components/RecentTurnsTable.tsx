@@ -300,7 +300,7 @@ const columns: ColumnDef<UIRow>[] = [
   {
     accessorFn: (r) => (isLeaf(r) ? r.tx.cache_read : 0),
     id: "cache_read",
-    header: "Cache R",
+    header: "Cache Read",
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
@@ -321,7 +321,7 @@ const columns: ColumnDef<UIRow>[] = [
   {
     accessorFn: (r) => (isLeaf(r) ? (r.tx.cache_creation_5m ?? 0) : 0),
     id: "cache_5m",
-    header: "CW 5m",
+    header: "Cache Write 5m",
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
@@ -343,7 +343,7 @@ const columns: ColumnDef<UIRow>[] = [
   {
     accessorFn: (r) => (isLeaf(r) ? (r.tx.cache_creation_1h ?? 0) : 0),
     id: "cache_1h",
-    header: "CW 1h",
+    header: "Cache Write 1h",
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
@@ -440,9 +440,9 @@ const COLUMN_LABELS: Record<string, string> = {
   model: "Model",
   in: "Input tokens",
   out: "Output tokens",
-  cache_read: "Cache read",
-  cache_5m: "Cache write 5m",
-  cache_1h: "Cache write 1h",
+  cache_read: "Cache Read",
+  cache_5m: "Cache Write 5m",
+  cache_1h: "Cache Write 1h",
   latency: "Latency",
   tools: "Tools",
   cost: "Cost",
