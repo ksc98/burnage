@@ -2101,10 +2101,14 @@ async fn resolve_oauth_hash(token: &str, salt: &str, env: &Env) -> (String, Opti
     let cache_key = format!("tok:{}", token_id);
 
     // KV hit: {uuid}|{email}. One round-trip to KV, skip the profile fetch.
+    // We keep uuid in the cache value for forensics even though the hash now
+    // derives from email — email is the durable anchor (stable across the
+    // obscure "account merged / uuid rekeyed" edge case, and it's what the
+    // dashboard's Google SSO sees), uuid is just there for debugging.
     if let Ok(kv) = env.kv("SESSION") {
         if let Ok(Some(cached)) = kv.get(&cache_key).text().await {
-            if let Some((uuid, email)) = cached.split_once('|') {
-                let hash = hash_identity(salt, "uuid:", uuid);
+            if let Some((_uuid, email)) = cached.split_once('|') {
+                let hash = hash_identity(salt, "email:", email);
                 auto_link(&kv, email, &hash).await;
                 return (hash, Some(email.to_string()));
             }
@@ -2116,14 +2120,14 @@ async fn resolve_oauth_hash(token: &str, salt: &str, env: &Env) -> (String, Opti
             if let Ok(builder) = kv.put(&cache_key, value) {
                 let _ = builder.expiration_ttl(3600).execute().await;
             }
-            let hash = hash_identity(salt, "uuid:", &uuid);
+            let hash = hash_identity(salt, "email:", &email);
             auto_link(&kv, &email, &hash).await;
             return (hash, Some(email));
         }
     }
 
     // Degraded fallback — raw-token hash. Prefix keeps it in a disjoint
-    // namespace from uuid hashes so a future successful resolve rejoins the
+    // namespace from email hashes so a future successful resolve rejoins the
     // stable identity cleanly. Rare: only fires on KV outages or profile
     // endpoint failures.
     console_log!(
