@@ -12,11 +12,9 @@ import TimeWindowPill from "@/components/TimeWindowPill";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
 import {
-  getStats,
   getRecent,
   getSessionEnds,
   getSessionsSummary,
-  getSessionTurns,
   type TransactionRow,
   type SessionEnds,
   type SessionModelBucket,
@@ -50,15 +48,13 @@ const ns = env.USER_STORE;
 const win = parseWindow(Astro.url.searchParams);
 const sinceMs = windowSince(win);
 
-let stats: Awaited<ReturnType<typeof getStats>> | null = null;
 let rows: TransactionRow[] = [];
 let sessionEnds: SessionEnds = {};
 let sessionBuckets: SessionModelBucket[] = [];
 let loadErr: string | null = null;
 if (userHash) {
   try {
-    [stats, rows, sessionBuckets, sessionEnds] = await Promise.all([
-      getStats(ns, userHash, sinceMs),
+    [rows, sessionBuckets, sessionEnds] = await Promise.all([
       getRecent(ns, userHash, sinceMs),
       getSessionsSummary(ns, userHash),
       getSessionEnds(ns, userHash),
@@ -72,29 +68,31 @@ if (userHash) {
 // affects time-scoped stats/graphs, not the inventory of sessions.
 const sessionList = buildSessionListFromSummary(sessionBuckets, sessionEnds);
 
-// Eagerly fetch turns for active sessions so the recent-turns table can
-// render their turns on first paint. Collapsed sessions wait for a click.
-const activeSessionIds = sessionList.filter((s) => s.active).map((s) => s.id);
-const activeTurnsResults = userHash && activeSessionIds.length > 0
-  ? await Promise.all(
-      activeSessionIds.map((id) => getSessionTurns(ns, userHash, id).catch(() => [] as TransactionRow[])),
-    )
-  : [];
+// Build initial turns for active sessions from the windowed rows we
+// already fetched — no separate getSessionTurns call needed.
+const activeSessionIds = new Set(
+  sessionList.filter((s) => s.active).map((s) => s.id),
+);
 const initialTurns: Record<string, TransactionRow[]> = {};
-activeSessionIds.forEach((id, i) => {
-  initialTurns[id] = activeTurnsResults[i] ?? [];
-});
+for (const r of rows) {
+  if (!r.session_id || !activeSessionIds.has(r.session_id)) continue;
+  (initialTurns[r.session_id] ??= []).push(r);
+}
 
 // Chronological: oldest → newest for chart + rolling sparklines
 const chron = [...rows].sort((a, b) => a.ts - b.ts);
 
+// All KPIs derived from windowed rows — no separate /stats call needed.
 const totalCost = rows.reduce((acc, r) => acc + estimateCostUsd(r), 0);
+const totalInput = rows.reduce((a, r) => a + r.input_tokens, 0);
+const totalOutput = rows.reduce((a, r) => a + r.output_tokens, 0);
+const totalCacheRead = rows.reduce((a, r) => a + r.cache_read, 0);
+const totalCacheCreation = rows.reduce((a, r) => a + r.cache_creation, 0);
 const sessions = new Set(rows.map((r) => r.session_id).filter(Boolean)).size;
 
 const cacheRate = (() => {
-  if (!stats) return 0;
-  const denom = stats.input_tokens + stats.cache_read + stats.cache_creation;
-  return denom > 0 ? stats.cache_read / denom : 0;
+  const denom = totalInput + totalCacheRead + totalCacheCreation;
+  return denom > 0 ? totalCacheRead / denom : 0;
 })();
 
 // Cache TTL split (only present on newer API responses; may be null on old rows).
@@ -239,11 +237,11 @@ const rateLimit =
   }
 
   {
-    stats && (
+    rows.length > 0 && (
       <section class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" data-live-region="kpis">
         <KpiCard
           label="Turns"
-          value={fmtInt(stats.turns)}
+          value={fmtInt(rows.length)}
           sub={`${fmtDuration(avgLatency)} avg`}
           accent="neutral"
           sparkValues={sparkTurns}
@@ -253,8 +251,8 @@ const rateLimit =
         </KpiCard>
         <KpiCard
           label="Output tokens"
-          value={fmtInt(stats.output_tokens)}
-          sub={`${fmtInt(stats.input_tokens)} input`}
+          value={fmtInt(totalOutput)}
+          sub={`${fmtInt(totalInput)} input`}
           accent="volume"
           sparkValues={sparkOutput}
           sparkMode="bars"
@@ -266,8 +264,8 @@ const rateLimit =
           value={`${(cacheRate * 100).toFixed(0)}%`}
           sub={
             ttlKnown
-              ? `${fmtInt(stats.cache_read)} read · ${longTtlPct.toFixed(0)}% 1h TTL`
-              : `${fmtInt(stats.cache_read)} read`
+              ? `${fmtInt(totalCacheRead)} read · ${longTtlPct.toFixed(0)}% 1h TTL`
+              : `${fmtInt(totalCacheRead)} read`
           }
           accent="volume"
           sparkValues={sparkCache}

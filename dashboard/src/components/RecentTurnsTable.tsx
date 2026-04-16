@@ -52,6 +52,7 @@ import { shortToolName } from "@/lib/tools";
 import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 import { subscribeRows } from "@/lib/rowsBus";
+import { subscribeSessions } from "@/lib/sessionsBus";
 import { TurnDetail } from "@/components/TurnDetail";
 
 type LeafRow = {
@@ -517,33 +518,9 @@ export default function RecentTurnsTable({
     setShownMap((p) => ({ ...p, [id]: HIDDEN_PER_GROUP }));
   }, []);
 
-  // Poll the sidebar's sessions endpoint on the same cadence as Sidebar.tsx
-  // (5 s) so the session headers stay current — turns count, cost, active
-  // state, and ordering all come from summaries, not from raw rows.
-  React.useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      if (typeof document !== "undefined" && document.hidden) return;
-      try {
-        const res = await fetch("/api/sessions.json", { cache: "no-store" });
-        if (!res.ok || cancelled) return;
-        const data = (await res.json()) as SessionSummary[];
-        if (!cancelled && Array.isArray(data)) setSummaries(data);
-      } catch {
-        /* next tick */
-      }
-    };
-    const iv = window.setInterval(tick, 5000);
-    const onVis = () => {
-      if (!document.hidden) void tick();
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      cancelled = true;
-      window.clearInterval(iv);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-  }, []);
+  // Subscribe to the sidebar's session summaries (it already polls every
+  // 5 s) — no duplicate fetch needed.
+  React.useEffect(() => subscribeSessions(setSummaries), []);
 
   // Merge live windowed rows (from the /api/recent poll) into the sessions
   // we've already loaded. Collapsed sessions stay collapsed with no

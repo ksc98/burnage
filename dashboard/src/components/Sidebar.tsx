@@ -8,6 +8,7 @@ import {
 import type { SessionSummary } from "@/lib/sessions";
 import { fmtAgo, fmtUsd } from "@/lib/format";
 import { cn } from "@/lib/cn";
+import { publishSessions } from "@/lib/sessionsBus";
 import { CommandPalette } from "@/components/CommandPalette";
 
 const COLLAPSE_KEY = "sidebar:collapsed";
@@ -61,7 +62,10 @@ export function Sidebar({
         });
         if (!res.ok) return;
         const data = (await res.json()) as SessionSummary[];
-        if (!cancelled && Array.isArray(data)) setSessions(data);
+        if (!cancelled && Array.isArray(data)) {
+          setSessions(data);
+          publishSessions(data);
+        }
       } catch {
         /* next tick will retry */
       } finally {
