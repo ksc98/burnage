@@ -138,6 +138,90 @@ table {
   50% { box-shadow: 0 0 0 4px oklch(0.78 0.16 155 / 0); }
 }
 
+/* Session filter toggle — segmented pill, Active | All. */
+.session-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  background: oklch(1 0 0 / 0.04);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.session-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 1.5rem;
+  padding: 0 0.6875rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-subtle-foreground);
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  transition:
+    color 150ms ease,
+    background 150ms ease,
+    box-shadow 150ms ease;
+}
+.session-toggle button:hover {
+  color: var(--color-muted-foreground);
+}
+.session-toggle button:focus-visible {
+  outline: 1px solid var(--color-border-strong);
+  outline-offset: 2px;
+}
+.session-toggle .live-dot {
+  /* Dim the pulse on the non-selected button; re-emphasize when selected. */
+  opacity: 0.45;
+  transition: opacity 150ms ease;
+}
+html[data-session-filter="active"] .session-toggle button[data-mode="active"],
+html[data-session-filter="all"] .session-toggle button[data-mode="all"] {
+  background: var(--color-card-elevated);
+  color: var(--color-foreground);
+  box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.06);
+}
+html[data-session-filter="active"] .session-toggle button[data-mode="active"] .live-dot {
+  opacity: 1;
+}
+
+/* Inline "Show all →" in empty-state card. */
+.session-toggle-link {
+  background: transparent;
+  border: 0;
+  color: var(--color-volume);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  transition: background 120ms ease;
+}
+.session-toggle-link:hover {
+  background: var(--color-volume-muted);
+}
+
+/* CSS-only filter applied to server-rendered cards. State lives on <html>
+   so the 5s live-region innerHTML swap doesn't clobber the user's choice. */
+html[data-session-filter="active"]
+  [data-session-card][data-session-active="false"] {
+  display: none;
+}
+html[data-session-filter="active"] [data-count-when="all"],
+html[data-session-filter="all"] [data-count-when="active"],
+html[data-session-filter="all"] [data-empty-when="active"] {
+  display: none;
+}
+
 /* Scrollbar — thin, dim. */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

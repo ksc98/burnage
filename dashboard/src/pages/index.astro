@@ -123,6 +123,10 @@ const chartData = chron
 // Attribute rows to sessions (shared aggregator used by sidebar too).
 const sessionList = buildSessionList(rows, sessionEnds);
 const activeSession = sessionList.find((s) => s.active) ?? null;
+const activeCount = sessionList.filter((s) => s.active).length;
+// Render enough cards so Active mode shows every active session,
+// while All mode keeps its familiar top-8 feel.
+const sessionCards = sessionList.slice(0, Math.max(8, activeCount));
 const now = Date.now();
 
 function shortSession(id: string): string {
@@ -283,14 +287,59 @@ const rateLimit =
   {
     sessionList.length > 0 && (
       <section class="mb-8" data-live-region="sessions">
-        <div class="flex items-baseline justify-between mb-3">
+        <div class="flex items-center justify-between gap-3 mb-3">
           <h2 class="text-sm font-medium">By session</h2>
-          <span class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
-            {sessionList.length} sessions
-          </span>
+          <div class="flex items-center gap-3">
+            <div class="session-toggle" role="tablist" aria-label="Filter sessions">
+              <button
+                type="button"
+                role="tab"
+                data-session-filter-btn
+                data-mode="active"
+              >
+                <span class="live-dot" />
+                Active
+              </button>
+              <button
+                type="button"
+                role="tab"
+                data-session-filter-btn
+                data-mode="all"
+              >
+                All
+              </button>
+            </div>
+            <span class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
+              <span data-count-when="active">{activeCount} active</span>
+              <span data-count-when="all">{sessionList.length} sessions</span>
+            </span>
+          </div>
         </div>
+        {activeCount === 0 && (
+          <div
+            data-empty-when="active"
+            class="card p-6 mb-3 flex items-center justify-between gap-4"
+          >
+            <div>
+              <p class="text-sm text-[var(--color-muted-foreground)]">
+                No active sessions right now.
+              </p>
+              <p class="text-xs text-[var(--color-subtle-foreground)] mt-1">
+                A session is active within 3 min of its last turn.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="session-toggle-link"
+              data-session-filter-btn
+              data-mode="all"
+            >
+              Show all →
+            </button>
+          </div>
+        )}
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-          {sessionList.slice(0, 8).map((s) => {
+          {sessionCards.map((s) => {
             const active = s.active;
             return (
             <a
@@ -298,6 +347,7 @@ const rateLimit =
               class={`card card-hover p-4 block ${active ? "ring-1 ring-[var(--color-good-muted)] ring-offset-0" : ""}`}
               data-session-card
               data-session-id={s.id}
+              data-session-active={active ? "true" : "false"}
               data-last-ts={s.lastTs}
             >
               <div class="flex items-baseline justify-between mb-2.5">
@@ -341,4 +391,21 @@ const rateLimit =
 
 
   <RecentTurnsTable client:load initialRows={rows} />
+
+  <script is:inline>
+    (function () {
+      document.addEventListener("click", function (e) {
+        const target = e.target;
+        if (!(target instanceof Element)) return;
+        const btn = target.closest("[data-session-filter-btn]");
+        if (!btn) return;
+        e.preventDefault();
+        const mode = btn.getAttribute("data-mode") === "all" ? "all" : "active";
+        document.documentElement.setAttribute("data-session-filter", mode);
+        try {
+          localStorage.setItem("claudemetry:session-filter", mode);
+        } catch (err) {}
+      });
+    })();
+  </script>
 </Base>
