@@ -721,7 +721,7 @@ fn print_totals(
             ),
         ),
         (
-            "vec queried",
+            "vec dims queried",
             human_count(total_vec_queried),
             human_count(LIMIT_VEC_QUERIED_DIMS as u64),
             total_vec_queried as f64 / LIMIT_VEC_QUERIED_DIMS,
@@ -732,7 +732,7 @@ fn print_totals(
             ),
         ),
         (
-            "vec stored",
+            "vec dims stored",
             human_count(total_vec_stored),
             human_count(LIMIT_VEC_STORED_DIMS as u64),
             total_vec_stored as f64 / LIMIT_VEC_STORED_DIMS,
