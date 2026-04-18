@@ -78,6 +78,12 @@ struct BackfillArgs {
     /// clamps to [1, 64]; omit to use the server default (16).
     #[arg(long)]
     embed_concurrency: Option<usize>,
+    /// Stagger between each embed-task's start, in ms. Spreads request
+    /// issuance across time to avoid burst-rate limits on the AI gateway.
+    /// Task i waits i*stagger_ms before calling embed. Clamped server-side
+    /// to [0, 1000]. 0 = no stagger (default).
+    #[arg(long)]
+    embed_stagger_ms: Option<u64>,
     /// Stop after N batches. Useful for benchmarking batch_size ×
     /// embed_concurrency combos without running the whole backfill.
     #[arg(long)]
@@ -236,6 +242,7 @@ fn main() -> Result<()> {
                 batch_size: args.batch_size,
                 before_ts: args.before_ts,
                 embed_concurrency: args.embed_concurrency,
+                embed_stagger_ms: args.embed_stagger_ms,
                 max_batches: args.max_batches,
             });
         }
