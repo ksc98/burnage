@@ -1427,6 +1427,8 @@ impl UserStore {
             before_ts: Option<i64>,
             #[serde(default)]
             embed_concurrency: Option<usize>,
+            #[serde(default)]
+            embed_stagger_ms: Option<u64>,
         }
         let b: Body = match req.json().await {
             Ok(b) => b,
@@ -1439,6 +1441,7 @@ impl UserStore {
         let batch_size = b.batch_size.unwrap_or(50).clamp(1, 200);
         let before_ts = b.before_ts.unwrap_or(i64::MAX);
         let embed_concurrency = b.embed_concurrency.unwrap_or(16).clamp(1, 64);
+        let embed_stagger_ms = b.embed_stagger_ms.unwrap_or(0).min(1000);
 
         let sql = self.state.storage().sql();
         let cursor = sql.exec(
@@ -1569,9 +1572,17 @@ impl UserStore {
 
             // Parallel embeds. As each completes (in arbitrary order thanks
             // to buffer_unordered), emit an event to the client stream.
-            let mut stream = futures_util::stream::iter(to_embed.into_iter().map(|pe| {
+            // embed_stagger_ms > 0 delays each task's start by i*stagger_ms
+            // from spawn, spreading out request issuance across the AI gateway
+            // (burst-rate mitigation; doesn't help against per-model concurrent
+            // caps, which is what buffer_unordered handles).
+            let mut stream = futures_util::stream::iter(to_embed.into_iter().enumerate().map(|(i, pe)| {
                 let env = env.clone();
                 async move {
+                    if embed_stagger_ms > 0 && i > 0 {
+                        let wait = std::time::Duration::from_millis(i as u64 * embed_stagger_ms);
+                        worker::Delay::from(wait).await;
+                    }
                     let start = Date::now().as_millis() as i64;
                     let result = embed_text(&env, &pe.combined).await;
                     let embed_ms = Date::now().as_millis() as i64 - start;

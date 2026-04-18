@@ -18,6 +18,7 @@ pub struct BackfillOpts {
     pub batch_size: i64,
     pub before_ts: Option<i64>,
     pub embed_concurrency: Option<usize>,
+    pub embed_stagger_ms: Option<u64>,
     pub max_batches: Option<i64>,
 }
 
@@ -43,6 +44,9 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
         }
         if let Some(c) = opts.embed_concurrency {
             body["embed_concurrency"] = serde_json::json!(c);
+        }
+        if let Some(s) = opts.embed_stagger_ms {
+            body["embed_stagger_ms"] = serde_json::json!(s);
         }
 
         // Batch header — printed *before* the response streams so the user
@@ -134,8 +138,13 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
         } else {
             format!("batch {}", page)
         };
+        let embed_avg_ms = if batch_scanned > 0 {
+            batch_embed_ms_sum as f64 / batch_scanned as f64
+        } else {
+            0.0
+        };
         println!(
-            "  {} {}  {} {}/{} ({:.1}%)  scanned={} upserted={} skipped={} embed_err={} upsert_err={}  (embed {:.1}s · upsert {:.2}s · rtt {:.1}s)",
+            "  {} {}  {} {}/{} ({:.1}%)  scanned={} upserted={} skipped={} embed_err={} upsert_err={}  (embed avg {:.0}ms · sum {:.1}s · upsert {:.2}s · wall {:.1}s)",
             header_line.dark_grey(),
             bar,
             "progress".dark_grey(),
@@ -147,6 +156,7 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
             skipped,
             embed_err,
             upsert_err,
+            embed_avg_ms,
             batch_embed_ms_sum as f64 / 1000.0,
             batch_upsert_ms as f64 / 1000.0,
             req_ms as f64 / 1000.0,
