@@ -33,6 +33,8 @@ export type TokenAreaPoint = {
 interface Props {
   data: TokenAreaPoint[];
   xKey: "ts" | "turn";
+  /** Force a specific X-axis range. Defaults to the data's auto domain. */
+  xDomain?: [number, number];
   xTickFormatter: (v: number) => string;
   xLabelFormatter?: (v: unknown) => string;
   yScale: "log" | "linear";
@@ -152,6 +154,7 @@ const chartConfig = {
 export default function TokenAreaChart({
   data,
   xKey,
+  xDomain,
   xTickFormatter,
   xLabelFormatter,
   yScale,
@@ -251,6 +254,9 @@ export default function TokenAreaChart({
           />
           <XAxis
             dataKey={xKey}
+            type="number"
+            domain={xDomain ?? ["dataMin", "dataMax"]}
+            allowDataOverflow={false}
             tickFormatter={(v) => xTickFormatter(v as number)}
             axisLine={false}
             tickLine={false}
