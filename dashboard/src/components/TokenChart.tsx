@@ -6,6 +6,7 @@ import {
   DEFAULT_WINDOW,
   windowIsBucketed,
   windowIsShort,
+  windowMs,
   type Window,
 } from "@/lib/pillWindow";
 import { useHydrated } from "@/hooks/use-hydrated";
@@ -185,10 +186,19 @@ export default function TokenChart({
   // hydration paint both emit nothing, then the real chart pops in.
   const hydrated = useHydrated();
   if (!hydrated || data.length === 0) return null;
+
+  // Anchor the X-axis to the active window so the right edge is "now",
+  // not the last data point. Without this, a long stretch of inactivity
+  // collapses out of the chart and the user can't tell whether the most
+  // recent activity was 5 minutes ago or 5 hours ago.
+  const now = Date.now();
+  const xDomain: [number, number] = [now - windowMs(win), now];
+
   return (
     <TokenAreaChart
       data={data}
       xKey="ts"
+      xDomain={xDomain}
       xTickFormatter={(v) => fmtTs(v, win)}
       xLabelFormatter={(v) => fmtTs(v as number, win)}
       yScale="log"
