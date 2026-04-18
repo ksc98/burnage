@@ -178,7 +178,7 @@ fn main() -> Result<()> {
                 account_id: args.account_id,
             })?;
             println!();
-            do_usage::vectorize_summary("claudemetry-turns");
+            do_usage::vectorize_summary("burnage");
             return Ok(());
         }
         Cmd::Search(args) => {

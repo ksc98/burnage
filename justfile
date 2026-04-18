@@ -75,16 +75,16 @@ deploy-all: deploy-api deploy-frontend
 
 # -------- Vectorize --------
 
-# One-time provisioning for /_cm/search. Creates the `claudemetry-turns`
-# index (768-dim, cosine — matches bge-base-en-v1.5). Per-user isolation is
+# One-time provisioning for /_cm/search. Creates the `burnage`
+# index (1024-dim, cosine — matches qwen3-embedding-0.6b). Per-user isolation is
 # handled at query time via Vectorize namespaces (namespace=<user_hash>),
 # not via a metadata index, so no create-metadata-index step is needed.
 # Idempotent: re-runs treat "already exists" as success.
 vectorize-create:
     #!/usr/bin/env bash
     set -uo pipefail
-    out=$(npx --yes wrangler@latest vectorize create claudemetry-turns \
-        --dimensions=768 --metric=cosine 2>&1)
+    out=$(npx --yes wrangler@latest vectorize create burnage \
+        --dimensions=1024 --metric=cosine 2>&1)
     echo "$out"
     if echo "$out" | grep -qiE "successfully (created|enqueued)|already exists|duplicate_name|duplicate"; then
         echo "→ index ready"
@@ -93,7 +93,7 @@ vectorize-create:
     fi
 
 vectorize-info:
-    npx --yes wrangler@latest vectorize info claudemetry-turns
+    npx --yes wrangler@latest vectorize info burnage
 
 # -------- burnage (Rust CLI) --------
 

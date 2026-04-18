@@ -36,9 +36,9 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
       │  (one instance per user_hash)   │  │  (shared index,         │
       │                                 │  │   namespace=user_hash)  │
       │  transactions + FTS5 virtual    │  │                         │
-      │    table (triggers mirror       │  │  claudemetry-turns,     │
-      │    user_text + assistant_text)  │  │  bge-base-en-v1.5       │
-      │  search_rate_limit counter      │  │  768-dim cosine         │
+      │    table (triggers mirror       │  │  burnage,               │
+      │    user_text + assistant_text)  │  │  qwen3-embedding-0.6b   │
+      │  search_rate_limit counter      │  │  1024-dim cosine        │
       │  session_ends                   │  │                         │
       │                                 │  │  search queries scoped  │
       │  POST /search orchestrates      ├─►│  to namespace=user_hash │
@@ -119,7 +119,7 @@ Provision the Vectorize index used for semantic search. This is idempotent
 and requires a CF API token with the `Vectorize: Edit` permission:
 
 ```bash
-just vectorize-create       # creates claudemetry-turns (768-dim cosine)
+just vectorize-create       # creates burnage (1024-dim cosine)
                             # + user_hash metadata index
 ```
 
@@ -184,7 +184,7 @@ Each user's private SQLite contains a single table (migrations are idempotent, a
 | `user_text`              | TEXT    | Last `user` message's text blocks + `tool_result` content (finalize) |
 | `assistant_text`         | TEXT    | Concatenated `text_delta` from the SSE stream (finalize)             |
 
-Indexed on `ts DESC`, `(session_id, ts)`, and a partial index on `ts` where `in_flight = 1` (backs the orphan sweep). An FTS5 virtual table (`transactions_fts`) mirrors `user_text` + `assistant_text` via sync triggers, and finalized turns are also embedded into a shared Vectorize index (`claudemetry-turns`, 768-dim, cosine) for semantic search — see **Search** below.
+Indexed on `ts DESC`, `(session_id, ts)`, and a partial index on `ts` where `in_flight = 1` (backs the orphan sweep). An FTS5 virtual table (`transactions_fts`) mirrors `user_text` + `assistant_text` via sync triggers, and finalized turns are also embedded into a shared Vectorize index (`burnage`, 1024-dim, cosine) for semantic search — see **Search** below.
 
 Each request writes the row twice. A placeholder (`in_flight = 1`, all metrics zero) is
 inserted into the DO as soon as the request arrives, so the dashboard can show a spinner
@@ -423,7 +423,7 @@ for the `user_text` / `assistant_text` search columns) and then discarded.
 ## Layout
 
 - `src/lib.rs` — fetch handler, two-phase ingest (`/ingest/start` + `/finalize`), `UserStore` Durable Object with FTS5 + RRF search orchestrator, SSE parser, Vectorize wrapper (via `js_sys::Reflect` since worker 0.8 has no first-class binding), user-hash derivation, admin probes, `/_cm/search`, `/_cm/turn`
-- `wrangler.toml` — proxy worker config: DO + SQLite migration, `[ai]` binding, `[[vectorize]]` binding for the `claudemetry-turns` index, observability on
+- `wrangler.toml` — proxy worker config: DO + SQLite migration, `[ai]` binding, `[[vectorize]]` binding for the `burnage` index, observability on
 - `burnage/` — cross-platform CLI (`whoami`, `stats`, `recent`, `search`, `quota`, `session`, `shell`)
 - `dashboard/` — Astro 6 + React dashboard worker, served behind Cloudflare Access
   - `src/pages/api/search.ts` — thin forwarder: CF Access email → `user_hash` → DO `/search`
