@@ -370,6 +370,19 @@ burnage session end <id>      # mark a session as ended (sets ended_at)
 burnage session ends          # list all recorded session end timestamps
 ```
 
+To fire `burnage session end` automatically on every Claude Code
+`SessionEnd`, install the plugin that ships in this repo:
+
+```
+/plugin marketplace add ksc98/burnage
+/plugin install burnage@burnage
+```
+
+Plugin source + safety notes: [`plugins/burnage/`](./plugins/burnage/). The
+plugin doesn't install the CLI — do that first with
+`cargo install --git https://github.com/ksc98/burnage burnage` (or, if you
+cloned this repo, `just burnage-install`).
+
 ### `burnage shell`
 
 Interactive SQL REPL + headless executor over `/_cm/admin/sql`. Built on
@@ -421,6 +434,7 @@ for the `user_text` / `assistant_text` search columns) and then discarded.
 - `src/lib.rs` — fetch handler, two-phase ingest (`/ingest/start` + `/finalize`), `UserStore` Durable Object with FTS5 + RRF search orchestrator, SSE parser, Vectorize wrapper (via `js_sys::Reflect` since worker 0.8 has no first-class binding), user-hash derivation, admin probes, `/_cm/search`, `/_cm/turn`
 - `wrangler.toml` — proxy worker config: DO + SQLite migration, `[ai]` binding, `[[vectorize]]` binding for the `burnage` index, observability on
 - `burnage/` — cross-platform CLI (`whoami`, `stats`, `recent`, `search`, `quota`, `session`, `shell`)
+- `.claude-plugin/marketplace.json` + `plugins/burnage/` — Claude Code marketplace + plugin that wires a `SessionEnd` hook to `burnage session end`
 - `dashboard/` — Astro 6 + React dashboard worker, served behind Cloudflare Access
   - `src/pages/api/search.ts` — thin forwarder: CF Access email → `user_hash` → DO `/search`
   - `src/components/CommandPalette.tsx` — `/` or `Cmd/Ctrl+K` palette, mode switch, RRF-merged results (hotkey wiring lives in `Sidebar.tsx`)

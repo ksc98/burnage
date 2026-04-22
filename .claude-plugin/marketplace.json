@@ -1,0 +1,20 @@
+{
+  "name": "burnage",
+  "owner": {
+    "name": "ksc98"
+  },
+  "metadata": {
+    "description": "Plugin(s) for the burnage Anthropic-API proxy."
+  },
+  "plugins": [
+    {
+      "name": "burnage",
+      "source": "./plugins/burnage",
+      "description": "Records SessionEnd events from Claude Code into your own burnage Durable Object (one POST to $ANTHROPIC_BASE_URL/_cm/session/end per session end).",
+      "homepage": "https://github.com/ksc98/burnage",
+      "repository": "https://github.com/ksc98/burnage",
+      "license": "MIT",
+      "keywords": ["burnage", "claude-code", "anthropic", "session"]
+    }
+  ]
+}
