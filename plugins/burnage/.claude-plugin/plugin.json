@@ -1,0 +1,11 @@
+{
+  "name": "burnage",
+  "description": "Records Claude Code SessionEnd events into your burnage Durable Object.",
+  "version": "0.1.0",
+  "homepage": "https://github.com/ksc98/burnage",
+  "repository": "https://github.com/ksc98/burnage",
+  "license": "MIT",
+  "author": {
+    "name": "ksc98"
+  }
+}

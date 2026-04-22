@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.session_id // empty' | xargs -r -I{} burnage session end {}"
+          }
+        ]
+      }
+    ]
+  }
+}
