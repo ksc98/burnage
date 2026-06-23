@@ -11,6 +11,26 @@ use worker::*;
 const UPSTREAM: &str = "https://api.anthropic.com";
 const DEFAULT_SALT: &str = "burnage-dev-unset";
 
+// Transparent gateway retry policy for transient upstream failures. Overridable
+// at runtime via the `UPSTREAM_MAX_RETRIES` / `UPSTREAM_RETRY_BASE_MS` vars (see
+// wrangler.toml); these are the fallbacks when the vars are unset.
+const DEFAULT_MAX_RETRIES: u32 = 2;
+const DEFAULT_RETRY_BASE_MS: u64 = 500;
+
+/// Upstream statuses worth a transparent retry: each means the origin produced
+/// no usable response, so nothing has reached the client yet and re-issuing the
+/// request is safe and invisible. `524` is Cloudflare's origin-timeout (what
+/// `api.anthropic.com` returns when it sheds load); `529` is Anthropic's
+/// `overloaded_error`. `429` is deliberately excluded — it carries its own
+/// `retry-after` that the client must honor, so we pass it straight through
+/// rather than hammering the origin from the gateway.
+fn is_retryable_upstream_status(status: u16) -> bool {
+    matches!(
+        status,
+        408 | 500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 525 | 526 | 527 | 529 | 530
+    )
+}
+
 // ---------- Top-level fetch (proxy) ----------
 
 #[event(fetch)]
@@ -148,8 +168,65 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         });
     }
 
-    let upstream_req = Request::new_with_init(&target, &init)?;
-    let mut resp = Fetch::Request(upstream_req).send().await?;
+    // Transparent gateway retry. A retryable status (or a subrequest-level
+    // error) here means upstream never delivered a usable response, so nothing
+    // has reached the client yet — re-issuing the request is safe and invisible.
+    // The request body is already buffered (`req_body_bytes`), so each attempt
+    // rebuilds an identical upstream request from the same `init`. Bounded with
+    // exponential backoff. This recovers transient upstream blips (524 origin
+    // timeouts, 5xx, 529 overload); it does NOT rescue a single genuinely-slow
+    // (>120s) generation, which will simply 524 again and fall through.
+    let max_retries = env
+        .var("UPSTREAM_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.to_string().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_MAX_RETRIES)
+        .min(5);
+    let retry_base_ms = env
+        .var("UPSTREAM_RETRY_BASE_MS")
+        .ok()
+        .and_then(|v| v.to_string().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RETRY_BASE_MS)
+        .min(10_000);
+
+    let mut attempt: u32 = 0;
+    let mut resp = loop {
+        let upstream_req = Request::new_with_init(&target, &init)?;
+        let result = Fetch::Request(upstream_req).send().await;
+
+        let retryable = match &result {
+            Ok(r) => is_retryable_upstream_status(r.status_code()),
+            Err(_) => true,
+        };
+        if !retryable || attempt >= max_retries {
+            // `result?` here mirrors the original single-shot behaviour: a
+            // surviving Err propagates to the client, an Ok response is returned.
+            break result?;
+        }
+
+        let backoff = retry_base_ms.saturating_mul(1u64 << attempt);
+        let upstream_status = match &result {
+            Ok(r) => r.status_code().to_string(),
+            Err(e) => format!("err:{}", e),
+        };
+        console_log!(
+            "{}",
+            json!({
+                "ts": Date::now().as_millis() as i64,
+                "dir": "upstream_retry",
+                "user_hash": user_hash.clone(),
+                "tx_id": tx_id.clone(),
+                "url": target.clone(),
+                "attempt": attempt + 1,
+                "max_retries": max_retries,
+                "upstream_status": upstream_status,
+                "backoff_ms": backoff,
+            })
+            .to_string()
+        );
+        worker::Delay::from(std::time::Duration::from_millis(backoff)).await;
+        attempt += 1;
+    };
 
     // Clone for out-of-band consumption; client-bound stream stays untouched.
     let resp_for_log = resp.cloned()?;

@@ -4,6 +4,8 @@ A Cloudflare Worker, written in Rust, that proxies requests to the Anthropic API
 
 Full passthrough: method, path, query, headers, and body are forwarded to `https://api.anthropic.com` unchanged. Streaming responses (SSE) are preserved — the client receives bytes immediately while the proxy captures the full body in the background via `ctx.wait_until`.
 
+Transient upstream failures are retried transparently. If Anthropic returns a retryable status (a `524` origin timeout, other `5xx`, or `529` overloaded) or the subrequest itself fails, the worker re-issues the request before any bytes reach the client, so the retry is invisible. Bounded with exponential backoff and tunable via `UPSTREAM_MAX_RETRIES` / `UPSTREAM_RETRY_BASE_MS` (see `wrangler.toml`). This recovers transient blips; it can't rescue a single generation that genuinely runs past the 120s gateway window.
+
 ## Architecture
 
 ```

@@ -35,6 +35,15 @@ index_name = "burnage"
 binding = "SESSION"
 id = "0217e705fa5f4ce7843f7ce7cbcf4f10"
 
+# Transparent upstream-retry knobs. The worker retries a request to
+# api.anthropic.com when it returns a retryable status (524 origin timeout,
+# 5xx, 529 overloaded) or the subrequest itself fails — but only before any
+# bytes have streamed to the client, so the retry is invisible. Unset → code
+# defaults (2 retries, 500ms base, exponential backoff). Uncomment to override.
+# [vars]
+# UPSTREAM_MAX_RETRIES = "2"     # capped at 5
+# UPSTREAM_RETRY_BASE_MS = "500" # capped at 10000; delay = base * 2^attempt
+
 [build]
 # Prepend ~/.cargo/bin so rustup-installed `cargo` and the freshly
 # `cargo install`ed `worker-build` resolve in fresh deploy shells
